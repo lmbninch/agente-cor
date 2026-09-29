@@ -16,7 +16,7 @@ export default async function handler(req, res) {
   try {
     // 2. Conectarse a COR y traer los datos
     // Nota: Esta URL es un ejemplo. Más adelante la cambiaremos por la URL exacta de COR.
-    const corResponse = await fetch('https://api.proyectocor.com/v1/tareas', {
+    const corResponse = await fetch('https://api.proyectocor.com/v1/tasks', {
       method: 'GET',
       headers: { 
         'Authorization': `Bearer ${process.env.COR_API_KEY}`,
