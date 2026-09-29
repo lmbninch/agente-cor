@@ -35,7 +35,7 @@ export default async function handler(req, res) {
 
     // 3. Analizamos con Gemini
     const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
-    const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" }); 
+    const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash-latest" }); 
     const prompt = `
       Eres el coordinador de tráfico de Distill. 
       Acaba de ingresar esta solicitud por Slack: "${userMessage}".
