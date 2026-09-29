@@ -37,7 +37,7 @@ export default async function handler(req, res) {
     const corData = await corResponse.json();
 
     // 3. ChatGPT (OpenAI): Conexión directa y estable por HTTP POST
-    const promptSistema = "Eres el coordinador de tráfico de Distill. Analiza los datos de carga de trabajo de COR provistos y sugiere de forma breve y justificada a la persona ideal del equipo para asignar la solicitud.";
+    const promptSistema = "Eres el coordinador de tráfico de Ninch. Analiza los datos de carga de trabajo de COR provistos y sugiere de forma breve y justificada a la persona ideal del equipo para asignar la solicitud.";
     const promptUsuario = `Solicitud ingresada por Slack: "${userMessage}". \n\nDatos de COR en tiempo real: ${JSON.stringify(corData)}`;
 
     const openaiResponse = await fetch('https://api.openai.com/v1/chat/completions', {
