@@ -1,9 +1,11 @@
 export default async function handler(req, res) {
+  // Aseguramos que solo responda a los mensajes (POST) de Slack
   if (req.method !== 'POST') return res.status(405).json({ error: 'Solo POST' });
+  
   const userMessage = req.body.text; 
 
   try {
-    // 1. COR Auth: Pedir el token temporal a COR
+    // 1. COR Auth: Pedir el token temporal a COR usando tus credenciales
     const credencialesBase64 = Buffer.from(`${process.env.COR_API_KEY}:${process.env.COR_CLIENT_SECRET}`).toString('base64');
     const tokenResponse = await fetch('https://api.projectcor.com/v1/oauth/token?grant_type=client_credentials', {
       method: 'POST',
@@ -13,11 +15,14 @@ export default async function handler(req, res) {
       }
     });
     
-    if (!tokenResponse.ok) throw new Error("Fallo al obtener el token de COR");
+    if (!tokenResponse.ok) {
+      const errorCorAuth = await tokenResponse.text();
+      throw new Error(`Fallo en autenticación de COR: ${errorCorAuth}`);
+    }
     const tokenData = await tokenResponse.json();
     const accessToken = tokenData.access_token;
 
-    // 2. COR Tasks: Pedimos las tareas
+    // 2. COR Tasks: Pedimos las tareas con el pase temporal
     const corResponse = await fetch('https://api.projectcor.com/v1/tasks', {
       method: 'GET',
       headers: { 
@@ -26,10 +31,13 @@ export default async function handler(req, res) {
       }
     });
     
-    if (!corResponse.ok) throw new Error("Fallo al obtener las tareas de COR");
+    if (!corResponse.ok) {
+      const errorCorTasks = await corResponse.text();
+      throw new Error(`Fallo al leer las tareas de COR: ${errorCorTasks}`);
+    }
     const corData = await corResponse.json();
 
-    // 3. Gemini: Conexión DIRECTA sin usar la librería que da error
+    // 3. Gemini: Conexión DIRECTA con el modelo 3.1 Pro de Ninch
     const prompt = `
       Eres el coordinador de tráfico de Distill. 
       Acaba de ingresar esta solicitud por Slack: "${userMessage}".
@@ -40,7 +48,8 @@ export default async function handler(req, res) {
       Analiza brevemente quién tiene el perfil y disponibilidad, y sugiere a la persona ideal.
     `;
 
-    const geminiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${process.env.GEMINI_API_KEY}`;
+    // Apuntamos específicamente a la versión 3.1 Pro
+    const geminiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-pro:generateContent?key=${process.env.GEMINI_API_KEY}`;
     
     const geminiResponse = await fetch(geminiUrl, {
       method: 'POST',
@@ -50,11 +59,15 @@ export default async function handler(req, res) {
       })
     });
     
-    if (!geminiResponse.ok) throw new Error("Fallo en la conexión directa con Gemini");
+    if (!geminiResponse.ok) {
+      const errorDeGoogle = await geminiResponse.text();
+      throw new Error(`Error de Google Gemini: ${errorDeGoogle}`);
+    }
+    
     const geminiData = await geminiResponse.json();
     const iaResponse = geminiData.candidates[0].content.parts[0].text;
 
-    // 4. Respondemos a Slack
+    // 4. Respondemos a Slack directamente al canal
     return res.status(200).json({ 
       response_type: "in_channel",
       text: iaResponse 
@@ -62,8 +75,9 @@ export default async function handler(req, res) {
 
   } catch (error) {
     console.error("Detalle del error:", error);
+    // Si algo falla, el bot nos dice exactamente qué fue sin colgarse
     return res.status(200).json({ 
-      text: `Hubo un problema: ${error.message}.` 
+      text: `Hubo un problema técnico: ${error.message}` 
     });
   }
 }
