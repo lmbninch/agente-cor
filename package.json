@@ -1,9 +1,0 @@
-{
-  "name": "agente-cor",
-  "version": "1.0.0",
-  "description": "Traffic Agent for Slack and COR",
-  "main": "index.js",
-  "dependencies": {
-    "@google/generative-ai": "^0.21.0"
-  }
-}
