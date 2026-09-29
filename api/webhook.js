@@ -32,10 +32,9 @@ export default async function handler(req, res) {
     if (!corResponse.ok) throw new Error("Fallo al leer las tareas de COR");
     const corData = await corResponse.json();
 
-    // 3. Gemini: Usando la librería oficial de Google con el modelo flash estándar
+    // 3. Gemini: Usando estrictamente el modelo clásico 'gemini-pro' compatible con v1
     const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
-    // Usamos 'gemini-1.5-flash', que es el modelo estándar soportado por la librería oficial
-    const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
+    const model = genAI.getGenerativeModel({ model: "gemini-pro" });
 
     const prompt = `
       Eres el coordinador de tráfico de Distill. 
