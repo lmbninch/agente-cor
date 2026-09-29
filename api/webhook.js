@@ -1,11 +1,10 @@
 export default async function handler(req, res) {
-  // Aseguramos que solo responda a los mensajes (POST) de Slack
   if (req.method !== 'POST') return res.status(405).json({ error: 'Solo POST' });
   
   const userMessage = req.body.text; 
 
   try {
-    // 1. COR Auth: Pedir el token temporal a COR usando tus credenciales
+    // 1. COR Auth: Pedir el token temporal a COR
     const credencialesBase64 = Buffer.from(`${process.env.COR_API_KEY}:${process.env.COR_CLIENT_SECRET}`).toString('base64');
     const tokenResponse = await fetch('https://api.projectcor.com/v1/oauth/token?grant_type=client_credentials', {
       method: 'POST',
@@ -22,7 +21,7 @@ export default async function handler(req, res) {
     const tokenData = await tokenResponse.json();
     const accessToken = tokenData.access_token;
 
-    // 2. COR Tasks: Pedimos las tareas con el pase temporal
+    // 2. COR Tasks: Pedimos las tareas
     const corResponse = await fetch('https://api.projectcor.com/v1/tasks', {
       method: 'GET',
       headers: { 
@@ -37,7 +36,7 @@ export default async function handler(req, res) {
     }
     const corData = await corResponse.json();
 
-    // 3. Gemini: Conexión DIRECTA con el modelo 3.1 Pro de Ninch
+    // 3. Gemini: Conexión directa usando gemini-1.5-pro (modelo oficial de API)
     const prompt = `
       Eres el coordinador de tráfico de Distill. 
       Acaba de ingresar esta solicitud por Slack: "${userMessage}".
@@ -48,8 +47,7 @@ export default async function handler(req, res) {
       Analiza brevemente quién tiene el perfil y disponibilidad, y sugiere a la persona ideal.
     `;
 
-    // Apuntamos específicamente a la versión 3.1 Pro
-    const geminiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-pro:generateContent?key=${process.env.GEMINI_API_KEY}`;
+    const geminiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-pro:generateContent?key=${process.env.GEMINI_API_KEY}`;
     
     const geminiResponse = await fetch(geminiUrl, {
       method: 'POST',
@@ -67,7 +65,7 @@ export default async function handler(req, res) {
     const geminiData = await geminiResponse.json();
     const iaResponse = geminiData.candidates[0].content.parts[0].text;
 
-    // 4. Respondemos a Slack directamente al canal
+    // 4. Respondemos a Slack
     return res.status(200).json({ 
       response_type: "in_channel",
       text: iaResponse 
@@ -75,7 +73,6 @@ export default async function handler(req, res) {
 
   } catch (error) {
     console.error("Detalle del error:", error);
-    // Si algo falla, el bot nos dice exactamente qué fue sin colgarse
     return res.status(200).json({ 
       text: `Hubo un problema técnico: ${error.message}` 
     });
