@@ -4,7 +4,7 @@ export default async function handler(req, res) {
   const userMessage = req.body.text; 
 
   try {
-    // 1. COR Auth: Pedir el token temporal a COR (Este paso ya comprobamos que funciona perfecto)
+    // 1. COR Auth: Pedir el token temporal a COR
     const credencialesBase64 = Buffer.from(`${process.env.COR_API_KEY}:${process.env.COR_CLIENT_SECRET}`).toString('base64');
     const tokenResponse = await fetch('https://api.projectcor.com/v1/oauth/token?grant_type=client_credentials', {
       method: 'POST',
@@ -36,37 +36,33 @@ export default async function handler(req, res) {
     }
     const corData = await corResponse.json();
 
-    // 3. Gemini: Petición HTTP directa utilizando la clave corporativa por URL (Sin dependencias externas)
-    const prompt = `
-      Eres el coordinador de tráfico de Distill. 
-      Acaba de ingresar esta solicitud por Slack: "${userMessage}".
-      
-      Aquí están los datos extraídos en tiempo real de COR: 
-      ${JSON.stringify(corData)}
-      
-      Analiza brevemente quién tiene el perfil y disponibilidad, y sugiere a la persona ideal.
-    `;
+    // 3. ChatGPT (OpenAI): Conexión directa y estable por HTTP POST
+    const promptSistema = "Eres el coordinador de tráfico de Distill. Analiza los datos de carga de trabajo de COR provistos y sugiere de forma breve y justificada a la persona ideal del equipo para asignar la solicitud.";
+    const promptUsuario = `Solicitud ingresada por Slack: "${userMessage}". \n\nDatos de COR en tiempo real: ${JSON.stringify(corData)}`;
 
-    // Usamos el endpoint estándar v1 con el parámetro ?key=
-    const geminiUrl = `https://generativelanguage.googleapis.com/v1/models/gemini-1.5-flash:generateContent?key=${process.env.GEMINI_API_KEY}`;
-    
-    const geminiResponse = await fetch(geminiUrl, {
+    const openaiResponse = await fetch('https://api.openai.com/v1/chat/completions', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: {
+        'Authorization': `Bearer ${process.env.OPENAI_API_KEY}`,
+        'Content-Type': 'application/json'
+      },
       body: JSON.stringify({
-        contents: [{ parts: [{ text: prompt }] }]
+        model: "gpt-4o", // O puedes usar "gpt-4o-mini"
+        messages: [
+          { role: "system", content: promptSistema },
+          { role: "user", content: promptUsuario }
+        ],
+        temperature: 0.7
       })
     });
     
-    if (!geminiResponse.ok) {
-      const errorDeGoogle = await geminiResponse.text();
-      throw new Error(`Error de Google Gemini: ${errorDeGoogle}`);
+    if (!openaiResponse.ok) {
+      const errorDeOpenAI = await openaiResponse.text();
+      throw new Error(`Error de OpenAI: ${errorDeOpenAI}`);
     }
     
-    const geminiData = await geminiResponse.json();
-    
-    // Extraemos la respuesta generada por la IA de forma segura
-    const iaResponse = geminiData.candidates?.[0]?.content?.parts?.[0]?.text || "No se pudo procesar la respuesta de la IA.";
+    const openaiData = await openaiResponse.json();
+    const iaResponse = openaiData.choices?.[0]?.message?.content || "No se pudo procesar la respuesta.";
 
     // 4. Respondemos a Slack con el análisis final
     return res.status(200).json({ 
