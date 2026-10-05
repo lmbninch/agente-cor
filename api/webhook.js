@@ -18,42 +18,27 @@ export default async function handler(req, res) {
       if (!tokenResponse.ok) throw new Error("Fallo en autenticación de COR");
       const tokenData = await tokenResponse.json();
 
-      // 2. MODO ASPIRADORA: Paginación activa para vencer el límite de COR
-      let allTasks = [];
-      let page = 1;
-      let totalPagesToFetch = 5; // Descargamos hasta 500 tareas activas de golpe
+      // 2. PRUEBA DE FUEGO: Fetch directo con tu ID de usuario (103480)
+      const corUrl = `https://api.projectcor.com/v1/tasks?archived=2&col=103480`;
+      const corResponse = await fetch(corUrl, {
+        method: 'GET',
+        headers: { 'Authorization': `Bearer ${tokenData.access_token}`, 'Content-Type': 'application/json' }
+      });
       
-      while (page <= totalPagesToFetch) {
-        const corUrl = `https://api.projectcor.com/v1/tasks?archived=2&per_page=100&page=${page}`;
-        const corResponse = await fetch(corUrl, {
-          method: 'GET',
-          headers: { 'Authorization': `Bearer ${tokenData.access_token}`, 'Content-Type': 'application/json' }
-        });
-        
-        if (!corResponse.ok) break;
-        const corData = await corResponse.json();
-        const tasksList = Array.isArray(corData) ? corData : (corData.data || corData.items || []);
-        
-        if (tasksList.length === 0) break; // Si ya no hay más tareas, cortamos el bucle
-        
-        allTasks = allTasks.concat(tasksList);
-        page++;
-      }
+      if (!corResponse.ok) throw new Error("Fallo al leer las tareas de COR");
+      const corData = await corResponse.json();
 
-      // 3. COMPRESIÓN DE DATOS Y EXTRACCIÓN DE PMs
-      const tareasLimpias = allTasks.map(tarea => {
-        // Extraemos a los colaboradores
+      // 3. COMPRESIÓN DE DATOS
+      const tasksList = Array.isArray(corData) ? corData : (corData.data || corData.items || []);
+      const tareasLimpias = tasksList.map(tarea => {
         const cols = (tarea.collaborators || []).map(c => `${c.first_name || ''} ${c.last_name || ''}`.trim());
-        // Extraemos al PM (clave si figuras como líder y no como colaborador)
         const pm = tarea.pm ? `${tarea.pm.first_name || ''} ${tarea.pm.last_name || ''}`.trim() : '';
-        
-        // Unimos a todos los involucrados sin repetirlos
         const involucrados = [...new Set([...cols, pm].filter(Boolean))].join(', ');
 
         return {
           t: tarea.name || tarea.title || 'Sin título',
           d: tarea.deadline || 'Sin fecha',
-          p: involucrados // "p" de personas
+          p: involucrados
         };
       });
 
@@ -63,13 +48,12 @@ export default async function handler(req, res) {
       const promptSistema = `Eres el coordinador de tráfico de la agencia Ninch. Hoy es ${fechaHoy}.
       
       REGLAS DE LECTURA CRÍTICA:
-      1. Tienes un listado comprimido de TODAS las tareas activas. "t" es título, "d" es deadline, "p" son las personas asignadas (incluye PMs y colaboradores).
-      2. BÚSQUEDA EXHAUSTIVA: Busca el nombre solicitado en la propiedad "p". ATENCIÓN: El usuario "Leandro Barral" puede aparecer registrado en el sistema bajo su nombre completo "Leandro Matías Barral". Busca ambas variantes.
-      3. CONTEO REAL: Cuenta y enlista cada tarea donde la persona aparezca en la propiedad "p".
+      1. Tienes un listado de tareas descargadas directamente usando el ID del usuario en Project COR. "t" es el título de la tarea, "d" es el deadline, "p" son las personas asignadas.
+      2. CONTEO REAL: Lee el JSON y lista todas las tareas que aparecen, ya que el sistema ya las pre-filtró por usuario.
       
-      Devuelve la respuesta final directamente, con un formato limpio en viñetas incluyendo el título de la tarea y el deadline.`;
+      Devuelve la respuesta final en un formato limpio usando viñetas. Incluye el título de la tarea y el deadline.`;
       
-      const promptUsuario = `Solicitud: "${text}". \n\nDatos de COR comprimidos (Total tareas analizadas: ${tareasLimpias.length}): ${JSON.stringify(tareasLimpias)}`;
+      const promptUsuario = `Solicitud ingresada por Slack: "${text}". \n\nDatos de COR pre-filtrados para Leandro Barral (Total de tareas recibidas por la API: ${tareasLimpias.length}): ${JSON.stringify(tareasLimpias)}`;
 
       const openaiResponse = await fetch('https://api.openai.com/v1/chat/completions', {
         method: 'POST',
@@ -127,6 +111,6 @@ export default async function handler(req, res) {
 
   return res.status(200).json({ 
     response_type: "in_channel",
-    text: "⏳ Aspirando las múltiples páginas de Project COR y cruzando roles... Esto tomará unos segundos." 
+    text: "⏳ Buscando tareas usando tu ID directo de COR... Esto tomará unos segundos." 
   });
 }
