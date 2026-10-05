@@ -36,15 +36,12 @@ export default async function handler(req, res) {
           const firstName = (user.first_name || '').toLowerCase();
           const lastName = (user.last_name || '').toLowerCase();
           
-          // Si el texto de Slack incluye su nombre o apellido, hace "match"
           return (firstName && textoLower.includes(firstName)) || 
                  (lastName && textoLower.includes(lastName)) || 
                  (fullName && textoLower.includes(fullName));
         });
       }
 
-      // Si la API de usuarios no está disponible o no encuentra coincidencias exactas por nombre,
-      // extraemos nombres directamente del texto para que la IA intente filtrar en memoria.
       let allTasks = [];
       
       if (colaboradoresEncontrados.length > 0) {
@@ -66,8 +63,7 @@ export default async function handler(req, res) {
           }
         }
       } else {
-        // Plan de contingencia: Si no detectó el nombre exacto en el directorio, 
-        // traemos un bloque amplio de tareas activas para que la IA busque el nombre libremente.
+        // Plan de contingencia amplio si se pregunta por todo el equipo o general
         const corResponse = await fetch('https://api.projectcor.com/v2/tasks?archived=2', {
           method: 'GET',
           headers: { 'Authorization': `Bearer ${tokenData.access_token}`, 'Content-Type': 'application/json' }
@@ -91,15 +87,18 @@ export default async function handler(req, res) {
         };
       });
 
-      // 4. Análisis de OpenAI
+      // 4. Análisis de OpenAI con Criterio de Tráfico Avanzado
       const fechaHoy = new Date().toLocaleString('es-AR', { timeZone: 'America/Buenos_Aires' });
 
-      const promptSistema = `Eres el coordinador de tráfico de la agencia Ninch. Hoy es ${fechaHoy}.
+      const promptSistema = `Eres el coordinador de tráfico experto de la agencia Ninch. Hoy es ${fechaHoy}.
       
-      REGLAS DE LECTURA:
-      1. Tienes un listado de tareas activas (en formato "t" título, "d" deadline, "p" personas asignadas).
-      2. BÚSQUEDA: Identifica a la persona o personas de las que habla el usuario en su solicitud y busca coincidencias en la propiedad "p".
-      3. CONTEO Y FORMATO: Cuenta y enlista cada tarea correspondiente en viñetas claras indicando el título y el deadline. Si no tiene tareas, indícalo educadamente.`;
+      REGLAS DE ANÁLISIS Y DISPONIBILIDAD:
+      1. ANALISIS DE CARGA: Recibes un listado de tareas activas ("t" = título, "d" = deadline, "p" = personas asignadas).
+      2. CRITERIO DE SATURACIÓN: No te limites solo a contar. Cruza el volumen de tareas con la proximidad de los deadlines. 
+         - Alguien con varias tareas que vencen hoy o mañana está **saturado o con disponibilidad crítica**.
+         - Alguien con pocas tareas o con plazos más lejanos tiene **mayor disponibilidad real**.
+      3. RECOMENDACIÓN DE TRÁFICO: Si en la consulta se comparan personas o se pide evaluar quién puede tomar un nuevo proyecto, emite un veredicto claro y justificado basándote en su carga actual.
+      4. FORMATO: Presenta la información de forma ejecutiva, ordenada en viñetas con el título de la tarea y su deadline correspondiente, cerrando con una conclusión de disponibilidad.`;
       
       const promptUsuario = `Solicitud en Slack: "${text}". \n\nDatos de COR procesados: ${JSON.stringify(tareasLimpias)}`;
 
@@ -159,6 +158,6 @@ export default async function handler(req, res) {
 
   return res.status(200).json({ 
     response_type: "in_channel",
-    text: "⏳ Consultando el directorio y analizando la carga de trabajo... Esto tomará unos segundos." 
+    text: "⏳ Analizando cargas de trabajo, deadlines y disponibilidad... Esto tomará unos segundos." 
   });
 }
