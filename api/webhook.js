@@ -7,6 +7,7 @@ export default async function handler(req, res) {
   if (req.body.is_background) {
     try {
       const { text, response_url } = req.body;
+      const textoLower = text.toLowerCase();
 
       // 1. COR Auth
       const credencialesBase64 = Buffer.from(`${process.env.COR_API_KEY}:${process.env.COR_CLIENT_SECRET}`).toString('base64');
@@ -18,19 +19,67 @@ export default async function handler(req, res) {
       if (!tokenResponse.ok) throw new Error("Fallo en autenticación de COR");
       const tokenData = await tokenResponse.json();
 
-      // 2. PRUEBA DE FUEGO: Fetch directo con tu ID de usuario (103480)
-      const corUrl = `https://api.projectcor.com/v1/tasks?archived=2&col=103480`;
-      const corResponse = await fetch(corUrl, {
+      // 2. DIRECTORIO DINÁMICO: Obtenemos la lista real de usuarios de la agencia
+      const usersResponse = await fetch('https://api.projectcor.com/v2/users', {
         method: 'GET',
         headers: { 'Authorization': `Bearer ${tokenData.access_token}`, 'Content-Type': 'application/json' }
       });
+
+      let colaboradoresEncontrados = [];
+      if (usersResponse.ok) {
+        const usersData = await usersResponse.json();
+        const usersList = Array.isArray(usersData) ? usersData : (usersData.data || usersData.items || []);
+        
+        // Buscamos dinámicamente a quién mencionó el usuario en el texto de Slack
+        colaboradoresEncontrados = usersList.filter(user => {
+          const fullName = `${user.first_name || ''} ${user.last_name || ''}`.toLowerCase();
+          const firstName = (user.first_name || '').toLowerCase();
+          const lastName = (user.last_name || '').toLowerCase();
+          
+          // Si el texto de Slack incluye su nombre o apellido, hace "match"
+          return (firstName && textoLower.includes(firstName)) || 
+                 (lastName && textoLower.includes(lastName)) || 
+                 (fullName && textoLower.includes(fullName));
+        });
+      }
+
+      // Si la API de usuarios no está disponible o no encuentra coincidencias exactas por nombre,
+      // extraemos nombres directamente del texto para que la IA intente filtrar en memoria.
+      let allTasks = [];
       
-      if (!corResponse.ok) throw new Error("Fallo al leer las tareas de COR");
-      const corData = await corResponse.json();
+      if (colaboradoresEncontrados.length > 0) {
+        // EXTRACCIÓN QUIRÚRGICA POR ID para cada colaborador detectado
+        for (const colaborador of colaboradoresEncontrados) {
+          const filterObj = { collaborator: colaborador.id };
+          const filterStr = encodeURIComponent(JSON.stringify(filterObj));
+          
+          const corUrl = `https://api.projectcor.com/v2/tasks?archived=2&filters=${filterStr}`;
+          const corResponse = await fetch(corUrl, {
+            method: 'GET',
+            headers: { 'Authorization': `Bearer ${tokenData.access_token}`, 'Content-Type': 'application/json' }
+          });
+          
+          if (corResponse.ok) {
+            const corData = await corResponse.json();
+            const tasksList = Array.isArray(corData) ? corData : (corData.data || corData.items || []);
+            allTasks = allTasks.concat(tasksList);
+          }
+        }
+      } else {
+        // Plan de contingencia: Si no detectó el nombre exacto en el directorio, 
+        // traemos un bloque amplio de tareas activas para que la IA busque el nombre libremente.
+        const corResponse = await fetch('https://api.projectcor.com/v2/tasks?archived=2', {
+          method: 'GET',
+          headers: { 'Authorization': `Bearer ${tokenData.access_token}`, 'Content-Type': 'application/json' }
+        });
+        if (corResponse.ok) {
+          const corData = await corResponse.json();
+          allTasks = Array.isArray(corData) ? corData : (corData.data || corData.items || []);
+        }
+      }
 
       // 3. COMPRESIÓN DE DATOS
-      const tasksList = Array.isArray(corData) ? corData : (corData.data || corData.items || []);
-      const tareasLimpias = tasksList.map(tarea => {
+      const tareasLimpias = allTasks.map(tarea => {
         const cols = (tarea.collaborators || []).map(c => `${c.first_name || ''} ${c.last_name || ''}`.trim());
         const pm = tarea.pm ? `${tarea.pm.first_name || ''} ${tarea.pm.last_name || ''}`.trim() : '';
         const involucrados = [...new Set([...cols, pm].filter(Boolean))].join(', ');
@@ -47,13 +96,12 @@ export default async function handler(req, res) {
 
       const promptSistema = `Eres el coordinador de tráfico de la agencia Ninch. Hoy es ${fechaHoy}.
       
-      REGLAS DE LECTURA CRÍTICA:
-      1. Tienes un listado de tareas descargadas directamente usando el ID del usuario en Project COR. "t" es el título de la tarea, "d" es el deadline, "p" son las personas asignadas.
-      2. CONTEO REAL: Lee el JSON y lista todas las tareas que aparecen, ya que el sistema ya las pre-filtró por usuario.
+      REGLAS DE LECTURA:
+      1. Tienes un listado de tareas activas (en formato "t" título, "d" deadline, "p" personas asignadas).
+      2. BÚSQUEDA: Identifica a la persona o personas de las que habla el usuario en su solicitud y busca coincidencias en la propiedad "p".
+      3. CONTEO Y FORMATO: Cuenta y enlista cada tarea correspondiente en viñetas claras indicando el título y el deadline. Si no tiene tareas, indícalo educadamente.`;
       
-      Devuelve la respuesta final en un formato limpio usando viñetas. Incluye el título de la tarea y el deadline.`;
-      
-      const promptUsuario = `Solicitud ingresada por Slack: "${text}". \n\nDatos de COR pre-filtrados para Leandro Barral (Total de tareas recibidas por la API: ${tareasLimpias.length}): ${JSON.stringify(tareasLimpias)}`;
+      const promptUsuario = `Solicitud en Slack: "${text}". \n\nDatos de COR procesados: ${JSON.stringify(tareasLimpias)}`;
 
       const openaiResponse = await fetch('https://api.openai.com/v1/chat/completions', {
         method: 'POST',
@@ -111,6 +159,6 @@ export default async function handler(req, res) {
 
   return res.status(200).json({ 
     response_type: "in_channel",
-    text: "⏳ Buscando tareas usando tu ID directo de COR... Esto tomará unos segundos." 
+    text: "⏳ Consultando el directorio y analizando la carga de trabajo... Esto tomará unos segundos." 
   });
 }
