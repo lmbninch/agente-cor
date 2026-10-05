@@ -18,8 +18,23 @@ export default async function handler(req, res) {
       if (!tokenResponse.ok) throw new Error("Fallo en autenticación de COR");
       const tokenData = await tokenResponse.json();
 
-      // 2. COR Tasks
-      const corResponse = await fetch('https://api.projectcor.com/v1/tasks', {
+      // 2. Cálculo dinámico de fechas (Hoy hasta Hoy + 15 días en formato YYYY-MM-DD)
+      const now = new Date();
+      const formatDate = (date) => {
+        const y = date.getFullYear();
+        const m = String(date.getMonth() + 1).padStart(2, '0');
+        const d = String(date.getDate()).padStart(2, '0');
+        return `${y}-${m}-${d}`;
+      };
+      
+      const startDate = formatDate(now);
+      const futureDate = new Date(now);
+      futureDate.setDate(now.getDate() + 15);
+      const endDate = formatDate(futureDate);
+
+      // 3. COR Tasks: Filtramos por Activas (archived=2), Creativos ARG (team=31010) y rango de 15 días
+      const corUrl = `https://api.projectcor.com/v1/tasks?archived=2&team=31010&start=${startDate}&end=${endDate}`;
+      const corResponse = await fetch(corUrl, {
         method: 'GET',
         headers: { 'Authorization': `Bearer ${tokenData.access_token}`, 'Content-Type': 'application/json' }
       });
@@ -27,20 +42,20 @@ export default async function handler(req, res) {
       if (!corResponse.ok) throw new Error("Fallo al leer las tareas de COR");
       const corData = await corResponse.json();
 
-      // 3. Análisis de OpenAI con Prompt optimizado para escenarios múltiples
-      // Calculamos la fecha actual en Argentina para que entienda cuándo es "hoy"
-      const fechaHoy = new Date().toLocaleString('es-AR', { timeZone: 'America/Buenos_Aires' });
+      // 4. Análisis de OpenAI con Prompt optimizado
+      const fechaHoy = now.toLocaleString('es-AR', { timeZone: 'America/Buenos_Aires' });
 
-      const promptSistema = `Eres el coordinador de tráfico experto de la agencia Ninch. Tienes acceso a los datos de Project COR. Hoy es ${fechaHoy}.
+      const promptSistema = `Eres el coordinador de tráfico de la agencia Ninch. Analizas datos de Project COR pre-filtrados (solo tareas activas del equipo Creativos ARG para los próximos 15 días). Hoy es ${fechaHoy}.
       
-      Tus REGLAS CRÍTICAS de análisis son:
-      1. COMPRENSIÓN DIRECTA: Si el usuario pide un listado o resumen, entrégalo en viñetas sin sugerir asignaciones. Si pide a quién asignar una tarea, analiza y da un solo nombre justificado.
-      2. EQUIPO CREATIVO: Identifica a este equipo filtrando usuarios cuyos roles o títulos contengan palabras como "Creativo", "Director", "Arte", "Redactor", "Copy", "Diseñador", "Design", o "Audiovisual". Excluye estrictamente a RRHH (People & Organization), Finanzas, y directivos C-Level.
-      3. FILTRO DE ARGENTINA: Si el usuario pide datos de "Argentina", busca en los clientes o usuarios campos, etiquetas o locaciones que coincidan con "AR", "Argentina" o "Buenos Aires".
-      4. FECHAS Y DEADLINES: Usa la fecha actual provista para cruzar con los deadlines de las tareas. Solo muestra lo que corresponde estrictamente al marco temporal solicitado.
-      5. CRITERIO DE ASIGNACIÓN: Cuando debas sugerir a alguien, cruza el filtro de rol + ubicación + disponibilidad (quien tenga más horas libres o menos tareas activas). No asignes tareas operativas a roles de management de RRHH.
+      REGLAS DE LECTURA CRÍTICA:
+      1. COLABORADORES: Para contabilizar correctamente la carga, inspecciona exhaustivamente el interior de las propiedades de "collaborators", "assignees", "users" o "team" dentro de cada tarea en el JSON. Busca coincidencias de nombre allí, no te quedes solo con el creador o el PM.
+      2. CONTEO REAL: Si el usuario pide saber cuántas tareas tiene alguien, cuenta y enlista cada tarea donde esa persona aparezca como colaborador.
       
-      Mantén el formato limpio, profesional y fácil de leer en Slack.`;
+      CRITERIOS DE SATURACIÓN Y ASIGNACIÓN:
+      1. Volumen vs. Urgencia: Cruza la cantidad total de tareas activas de cada persona con la proximidad de sus deadlines. Alguien con múltiples tareas para la próxima semana tiene mayor disponibilidad real que alguien con pocas tareas que vencen hoy.
+      2. Filtro de Roles: Excluye permanentemente a RRHH (People & Organization), Finanzas y C-Level para tareas operativas, sin importar su disponibilidad aparente.
+      
+      Formato: Si se solicita un listado, devuélvelo en viñetas incluyendo el nombre de la tarea/proyecto y el deadline específico.`;
       
       const promptUsuario = `Solicitud ingresada por Slack: "${text}". \n\nDatos de COR extraídos en tiempo real: ${JSON.stringify(corData)}`;
 
@@ -62,7 +77,7 @@ export default async function handler(req, res) {
       const openaiData = await openaiResponse.json();
       const iaResponse = openaiData.choices?.[0]?.message?.content || "No se pudo generar el análisis.";
 
-      // 4. Enviar respuesta final a Slack
+      // 5. Enviar respuesta final a Slack
       await fetch(response_url, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -109,6 +124,6 @@ export default async function handler(req, res) {
   // Respondemos inmediatamente a Slack para que no corte la conexión
   return res.status(200).json({ 
     response_type: "in_channel",
-    text: "⏳ Analizando la carga de trabajo y fechas en COR... Esto tomará unos segundos." 
+    text: "⏳ Analizando la carga de trabajo del equipo creativo en COR... Esto tomará unos segundos." 
   });
 }
