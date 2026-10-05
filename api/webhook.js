@@ -18,25 +18,42 @@ export default async function handler(req, res) {
       if (!tokenResponse.ok) throw new Error("Fallo en autenticación de COR");
       const tokenData = await tokenResponse.json();
 
-      // 2. COR Tasks: Forzamos el límite de paginación al máximo para evitar que corte en 20
-      const corUrl = `https://api.projectcor.com/v1/tasks?archived=2&limit=1000&per_page=1000`;
-      const corResponse = await fetch(corUrl, {
-        method: 'GET',
-        headers: { 'Authorization': `Bearer ${tokenData.access_token}`, 'Content-Type': 'application/json' }
-      });
+      // 2. MODO ASPIRADORA: Paginación activa para vencer el límite de COR
+      let allTasks = [];
+      let page = 1;
+      let totalPagesToFetch = 5; // Descargamos hasta 500 tareas activas de golpe
       
-      if (!corResponse.ok) throw new Error("Fallo al leer las tareas de COR");
-      const corData = await corResponse.json();
+      while (page <= totalPagesToFetch) {
+        const corUrl = `https://api.projectcor.com/v1/tasks?archived=2&per_page=100&page=${page}`;
+        const corResponse = await fetch(corUrl, {
+          method: 'GET',
+          headers: { 'Authorization': `Bearer ${tokenData.access_token}`, 'Content-Type': 'application/json' }
+        });
+        
+        if (!corResponse.ok) break;
+        const corData = await corResponse.json();
+        const tasksList = Array.isArray(corData) ? corData : (corData.data || corData.items || []);
+        
+        if (tasksList.length === 0) break; // Si ya no hay más tareas, cortamos el bucle
+        
+        allTasks = allTasks.concat(tasksList);
+        page++;
+      }
 
-      // 3. COMPRESIÓN DE DATOS
-      const tasksList = Array.isArray(corData) ? corData : (corData.data || corData.items || []);
-      
-      const tareasLimpias = tasksList.map(tarea => {
-        const asignados = (tarea.collaborators || []).map(c => `${c.first_name || ''} ${c.last_name || ''}`.trim()).join(', ');
+      // 3. COMPRESIÓN DE DATOS Y EXTRACCIÓN DE PMs
+      const tareasLimpias = allTasks.map(tarea => {
+        // Extraemos a los colaboradores
+        const cols = (tarea.collaborators || []).map(c => `${c.first_name || ''} ${c.last_name || ''}`.trim());
+        // Extraemos al PM (clave si figuras como líder y no como colaborador)
+        const pm = tarea.pm ? `${tarea.pm.first_name || ''} ${tarea.pm.last_name || ''}`.trim() : '';
+        
+        // Unimos a todos los involucrados sin repetirlos
+        const involucrados = [...new Set([...cols, pm].filter(Boolean))].join(', ');
+
         return {
           t: tarea.name || tarea.title || 'Sin título',
           d: tarea.deadline || 'Sin fecha',
-          c: asignados
+          p: involucrados // "p" de personas
         };
       });
 
@@ -46,18 +63,13 @@ export default async function handler(req, res) {
       const promptSistema = `Eres el coordinador de tráfico de la agencia Ninch. Hoy es ${fechaHoy}.
       
       REGLAS DE LECTURA CRÍTICA:
-      1. Tienes un listado comprimido de tareas activas. "t" es el título, "d" es el deadline, "c" son los colaboradores asignados.
-      2. BÚSQUEDA EXHAUSTIVA: Busca exactamente el nombre solicitado en la propiedad "c" de cada tarea.
-      3. CONTEO REAL: Si el usuario pide saber cuántas tareas tiene alguien, cuenta y enlista cada tarea donde esa persona aparezca.
-      4. Si te piden un rango de fechas (ej. "próximos 15 días"), mira la propiedad "d" de las tareas y filtra según la fecha de hoy. Excluye lo que esté fuera de ese rango temporal.
+      1. Tienes un listado comprimido de TODAS las tareas activas. "t" es título, "d" es deadline, "p" son las personas asignadas (incluye PMs y colaboradores).
+      2. BÚSQUEDA EXHAUSTIVA: Busca el nombre solicitado en la propiedad "p". ATENCIÓN: El usuario "Leandro Barral" puede aparecer registrado en el sistema bajo su nombre completo "Leandro Matías Barral". Busca ambas variantes.
+      3. CONTEO REAL: Cuenta y enlista cada tarea donde la persona aparezca en la propiedad "p".
       
-      CRITERIOS DE ASIGNACIÓN:
-      1. Cruza la cantidad total de tareas activas con la proximidad de deadlines.
-      2. Excluye permanentemente a RRHH, Finanzas y C-Level para tareas operativas.
+      Devuelve la respuesta final directamente, con un formato limpio en viñetas incluyendo el título de la tarea y el deadline.`;
       
-      Devuelve la respuesta en viñetas incluyendo el nombre de la tarea y el deadline.`;
-      
-      const promptUsuario = `Solicitud: "${text}". \n\nDatos de COR comprimidos: ${JSON.stringify(tareasLimpias)}`;
+      const promptUsuario = `Solicitud: "${text}". \n\nDatos de COR comprimidos (Total tareas analizadas: ${tareasLimpias.length}): ${JSON.stringify(tareasLimpias)}`;
 
       const openaiResponse = await fetch('https://api.openai.com/v1/chat/completions', {
         method: 'POST',
@@ -115,6 +127,6 @@ export default async function handler(req, res) {
 
   return res.status(200).json({ 
     response_type: "in_channel",
-    text: "⏳ Extrayendo la base de datos completa de COR y analizando... Esto tomará unos segundos." 
+    text: "⏳ Aspirando las múltiples páginas de Project COR y cruzando roles... Esto tomará unos segundos." 
   });
 }
