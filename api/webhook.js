@@ -9,7 +9,62 @@ export default async function handler(req, res) {
       const { text, response_url } = req.body;
       const textoLower = text.toLowerCase();
 
-      // 1. COR Auth
+      // 1. DIRECTORIO OFICIAL DEL EQUIPO CREATIVO (IDs exactos de COR)
+      const DIRECTORIO_CREATIVO = {
+        "nasa": 103413,
+        "lombardo": 103413,
+        "agustina perez": 103414,
+        "carolina": 103421,
+        "dorso": 103421,
+        "vanesa": 103434,
+        "copes": 103434,
+        "mercedes": 103436,
+        "palumbo": 103436,
+        "lucas": 103439,
+        "vega": 103439,
+        "candela jordi": 103441,
+        "jordi": 103441,
+        "joi": 103443,
+        "sanchez": 103443,
+        "demian": 103453,
+        "buezas": 103453,
+        "julieta": 103455,
+        "lamarque": 103455,
+        "agustina carro": 103467,
+        "carro": 103467,
+        "candela dallocchio": 103468,
+        "dallocchio": 103468,
+        "ignacio": 103477,
+        "cairola": 103477,
+        "sol": 103479,
+        "rodriguez": 103479,
+        "escudero": 103479,
+        "leandro": 103480,
+        "lean": 103480,
+        "barral": 103480,
+        "federico": 103481,
+        "fede": 103481,
+        "martinez": 103481,
+        "matilda": 103486,
+        "brero": 103486,
+        "joaquin": 104457,
+        "baez": 104457,
+        "ana": 104458,
+        "paula": 104458,
+        "barel": 104458,
+        "milagros": 104459,
+        "garcia": 104459
+      };
+
+      // Detectamos qué nombres o apellidos mencionó el usuario en Slack
+      let idsABuscar = [];
+      for (const [clave, id] of Object.entries(DIRECTORIO_CREATIVO)) {
+        if (textoLower.includes(clave) && !idsABuscar.includes(id)) {
+          idsABuscar.push(id);
+        }
+      }
+
+      // 2. COR Auth
       const credencialesBase64 = Buffer.from(`${process.env.COR_API_KEY}:${process.env.COR_CLIENT_SECRET}`).toString('base64');
       const tokenResponse = await fetch('https://api.projectcor.com/v1/oauth/token?grant_type=client_credentials', {
         method: 'POST',
@@ -19,35 +74,12 @@ export default async function handler(req, res) {
       if (!tokenResponse.ok) throw new Error("Fallo en autenticación de COR");
       const tokenData = await tokenResponse.json();
 
-      // 2. DIRECTORIO DINÁMICO: Obtenemos todos los usuarios para mapear sus IDs reales
-      const usersResponse = await fetch('https://api.projectcor.com/v2/users', {
-        method: 'GET',
-        headers: { 'Authorization': `Bearer ${tokenData.access_token}`, 'Content-Type': 'application/json' }
-      });
-
-      let colaboradoresEncontrados = [];
-      if (usersResponse.ok) {
-        const usersData = await usersResponse.json();
-        const usersList = Array.isArray(usersData) ? usersData : (usersData.data || usersData.items || []);
-        
-        // Buscamos a qué usuarios nombró el usuario en el texto de Slack de forma flexible
-        colaboradoresEncontrados = usersList.filter(user => {
-          const firstName = (user.first_name || '').toLowerCase();
-          const lastName = (user.last_name || '').toLowerCase();
-          
-          // Comparamos si el nombre o apellido suelto está presente en la consulta
-          return (firstName && textoLower.includes(firstName)) || 
-                 (lastName && textoLower.includes(lastName));
-        });
-      }
-
+      // 3. EXTRACCIÓN QUIRÚRGICA: Consultamos la API v2 para cada ID detectado
       let allTasks = [];
 
-      // 3. EXTRACCIÓN QUIRÚRGICA DIRECTA POR ID
-      if (colaboradoresEncontrados.length > 0) {
-        for (const colaborador of colaboradoresEncontrados) {
-          // Usamos el formato JSON exacto de la API v2 que descubrimos en Network
-          const filterObj = { collaborator: colaborador.id };
+      if (idsABuscar.length > 0) {
+        for (const id of idsABuscar) {
+          const filterObj = { collaborator: id };
           const filterStr = encodeURIComponent(JSON.stringify(filterObj));
           
           const corUrl = `https://api.projectcor.com/v2/tasks?archived=2&filters=${filterStr}`;
@@ -62,19 +94,14 @@ export default async function handler(req, res) {
             allTasks = allTasks.concat(tasksList);
           }
         }
-      } 
-
-      // Si no detectó nombres específicos en el directorio, traemos un bloque amplio reciente
-      if (allTasks.length === 0 && colaboradoresEncontrados.length === 0) {
-        const corUrl = `https://api.projectcor.com/v2/tasks?archived=2&per_page=100&page=1`;
-        const corResponse = await fetch(corUrl, {
-          method: 'GET',
-          headers: { 'Authorization': `Bearer ${tokenData.access_token}`, 'Content-Type': 'application/json' }
+      } else {
+        // Si no menciona a nadie específico, avisamos en la respuesta
+        await fetch(response_url, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ response_type: "in_channel", text: "⚠️ Por favor, menciona al menos a un integrante del equipo creativo en tu consulta." })
         });
-        if (corResponse.ok) {
-          const corData = await corResponse.json();
-          allTasks = Array.isArray(corData) ? corData : (corData.data || corData.items || []);
-        }
+        return res.status(200).json({ success: true });
       }
 
       // 4. COMPRESIÓN DE DATOS
@@ -92,18 +119,17 @@ export default async function handler(req, res) {
         };
       });
 
-      // 5. Análisis de OpenAI
+      // 5. Análisis de OpenAI con Criterio de Tráfico
       const fechaHoy = new Date().toLocaleString('es-AR', { timeZone: 'America/Buenos_Aires' });
 
       const promptSistema = `Eres el coordinador de tráfico experto de la agencia Ninch. Hoy es ${fechaHoy}.
       
       REGLAS DE ANÁLISIS:
-      1. Recibes un listado de tareas ("t" = título, "d" = deadline, "p" = personas asignadas).
-      2. BÚSQUEDA EXHAUSTIVA: Analiza las tareas recibidas y busca los nombres de las personas consultadas en la propiedad "p".
-      3. CRITERIO DE DISPONIBILIDAD: Cruza el volumen de tareas con la cercanía de los deadlines para decidir quién está más libre o saturado.
-      4. FORMATO: Presenta un reporte profesional en viñetas con el título de la tarea y su deadline, cerrando con un veredicto de quién está más libre para tomar nuevos proyectos.`;
+      1. Recibes un listado limpio de tareas extraídas directamente de la base de datos para los colaboradores consultados ("t" = título, "d" = deadline, "p" = personas asignadas).
+      2. CRITERIO DE DISPONIBILIDAD: Contrasta el volumen de tareas activas de cada persona con la cercanía de los deadlines para evaluar quién está más libre o saturado.
+      3. FORMATO: Presenta un reporte ejecutivo en viñetas detallando las tareas y deadlines de cada persona mencionada, y cierra obligatoriamente con un veredicto claro y justificado sobre **quién está más libre** para tomar un nuevo proyecto.`;
       
-      const promptUsuario = `Solicitud en Slack: "${text}". \n\nDatos de COR procesados: ${JSON.stringify(tareasLimpias)}`;
+      const promptUsuario = `Solicitud en Slack: "${text}". \n\nDatos reales extraídos de COR: ${JSON.stringify(tareasLimpias)}`;
 
       const openaiResponse = await fetch('https://api.openai.com/v1/chat/completions', {
         method: 'POST',
@@ -161,6 +187,6 @@ export default async function handler(req, res) {
 
   return res.status(200).json({ 
     response_type: "in_channel",
-    text: "⏳ Consultando IDs y evaluando disponibilidad en COR... Esto tomará unos segundos." 
+    text: "⏳ Consultando las tareas del equipo creativo en COR... Esto tomará unos segundos." 
   });
 }
