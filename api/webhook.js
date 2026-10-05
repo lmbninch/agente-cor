@@ -19,7 +19,7 @@ export default async function handler(req, res) {
       if (!tokenResponse.ok) throw new Error("Fallo en autenticación de COR");
       const tokenData = await tokenResponse.json();
 
-      // 2. DIRECTORIO DINÁMICO INTELIGENTE: Obtenemos todos los usuarios
+      // 2. DIRECTORIO DINÁMICO: Obtenemos todos los usuarios para mapear sus IDs reales
       const usersResponse = await fetch('https://api.projectcor.com/v2/users', {
         method: 'GET',
         headers: { 'Authorization': `Bearer ${tokenData.access_token}`, 'Content-Type': 'application/json' }
@@ -30,25 +30,23 @@ export default async function handler(req, res) {
         const usersData = await usersResponse.json();
         const usersList = Array.isArray(usersData) ? usersData : (usersData.data || usersData.items || []);
         
-        // Búsqueda flexible: tokeniza el texto del usuario de Slack y busca coincidencias parciales
+        // Buscamos a qué usuarios nombró el usuario en el texto de Slack de forma flexible
         colaboradoresEncontrados = usersList.filter(user => {
-          const fullName = `${user.first_name || ''} ${user.last_name || ''}`.toLowerCase();
           const firstName = (user.first_name || '').toLowerCase();
           const lastName = (user.last_name || '').toLowerCase();
           
-          // Verificamos si alguna parte del nombre o apellido está en el mensaje de Slack
-          const palabras = textoLower.split(/\s+/);
-          return palabras.some(palabra => 
-            palabra.length > 2 && (firstName.includes(palabra) || lastName.includes(palabra) || fullName.includes(palabra))
-          );
+          // Comparamos si el nombre o apellido suelto está presente en la consulta
+          return (firstName && textoLower.includes(firstName)) || 
+                 (lastName && textoLower.includes(lastName));
         });
       }
 
       let allTasks = [];
 
+      // 3. EXTRACCIÓN QUIRÚRGICA DIRECTA POR ID
       if (colaboradoresEncontrados.length > 0) {
-        // EXTRACCIÓN QUIRÚRGICA POR ID para cada colaborador detectado
         for (const colaborador of colaboradoresEncontrados) {
+          // Usamos el formato JSON exacto de la API v2 que descubrimos en Network
           const filterObj = { collaborator: colaborador.id };
           const filterStr = encodeURIComponent(JSON.stringify(filterObj));
           
@@ -64,30 +62,22 @@ export default async function handler(req, res) {
             allTasks = allTasks.concat(tasksList);
           }
         }
-      }
+      } 
 
-      // Si por alguna razón el directorio dinámico no encontró IDs exactos,
-      // Hacemos un barrido masivo seguro por páginas (hasta 500 tareas) para no quedar atrapados en las primeras 20.
-      if (allTasks.length === 0) {
-        let page = 1;
-        while (page <= 5) {
-          const corUrl = `https://api.projectcor.com/v2/tasks?archived=2&per_page=100&page=${page}`;
-          const corResponse = await fetch(corUrl, {
-            method: 'GET',
-            headers: { 'Authorization': `Bearer ${tokenData.access_token}`, 'Content-Type': 'application/json' }
-          });
-          
-          if (!corResponse.ok) break;
+      // Si no detectó nombres específicos en el directorio, traemos un bloque amplio reciente
+      if (allTasks.length === 0 && colaboradoresEncontrados.length === 0) {
+        const corUrl = `https://api.projectcor.com/v2/tasks?archived=2&per_page=100&page=1`;
+        const corResponse = await fetch(corUrl, {
+          method: 'GET',
+          headers: { 'Authorization': `Bearer ${tokenData.access_token}`, 'Content-Type': 'application/json' }
+        });
+        if (corResponse.ok) {
           const corData = await corResponse.json();
-          const tasksList = Array.isArray(corData) ? corData : (corData.data || corData.items || []);
-          
-          if (tasksList.length === 0) break;
-          allTasks = allTasks.concat(tasksList);
-          page++;
+          allTasks = Array.isArray(corData) ? corData : (corData.data || corData.items || []);
         }
       }
 
-      // 3. COMPRESIÓN DE DATOS (Eliminamos duplicados si un usuario apareció por múltiples vías)
+      // 4. COMPRESIÓN DE DATOS
       const tasksUnicas = Array.from(new Map(allTasks.map(task => [task.id, task])).values());
 
       const tareasLimpias = tasksUnicas.map(tarea => {
@@ -102,16 +92,16 @@ export default async function handler(req, res) {
         };
       });
 
-      // 4. Análisis de OpenAI con Criterio de Tráfico Avanzado
+      // 5. Análisis de OpenAI
       const fechaHoy = new Date().toLocaleString('es-AR', { timeZone: 'America/Buenos_Aires' });
 
       const promptSistema = `Eres el coordinador de tráfico experto de la agencia Ninch. Hoy es ${fechaHoy}.
       
-      REGLAS DE ANÁLISIS Y DISPONIBILIDAD:
-      1. ANALISIS DE CARGA: Recibes un listado de tareas activas ("t" = título, "d" = deadline, "p" = personas asignadas).
-      2. BUSQUEDA EXHAUSTIVA: Identifica a las personas nombradas por el usuario en la solicitud y busca sus nombres en la propiedad "p" de cada tarea.
-      3. CRITERIO DE SATURACIÓN: Cruza el volumen de tareas de cada persona con la proximidad de los deadlines para determinar quién está más libre o saturado.
-      4. FORMATO: Presenta la información de forma ejecutiva, ordenada en viñetas con el título de la tarea y su deadline correspondiente, cerrando con una conclusión clara de disponibilidad o recomendación de asignación.`;
+      REGLAS DE ANÁLISIS:
+      1. Recibes un listado de tareas ("t" = título, "d" = deadline, "p" = personas asignadas).
+      2. BÚSQUEDA EXHAUSTIVA: Analiza las tareas recibidas y busca los nombres de las personas consultadas en la propiedad "p".
+      3. CRITERIO DE DISPONIBILIDAD: Cruza el volumen de tareas con la cercanía de los deadlines para decidir quién está más libre o saturado.
+      4. FORMATO: Presenta un reporte profesional en viñetas con el título de la tarea y su deadline, cerrando con un veredicto de quién está más libre para tomar nuevos proyectos.`;
       
       const promptUsuario = `Solicitud en Slack: "${text}". \n\nDatos de COR procesados: ${JSON.stringify(tareasLimpias)}`;
 
@@ -132,7 +122,7 @@ export default async function handler(req, res) {
       const openaiData = await openaiResponse.json();
       const iaResponse = openaiData.choices?.[0]?.message?.content || "No se pudo generar el análisis.";
 
-      // 5. Enviar a Slack
+      // 6. Enviar a Slack
       await fetch(response_url, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -171,6 +161,6 @@ export default async function handler(req, res) {
 
   return res.status(200).json({ 
     response_type: "in_channel",
-    text: "⏳ Analizando cargas de trabajo, deadlines y disponibilidad... Esto tomará unos segundos." 
+    text: "⏳ Consultando IDs y evaluando disponibilidad en COR... Esto tomará unos segundos." 
   });
 }
