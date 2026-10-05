@@ -14,6 +14,8 @@ export default async function handler(req, res) {
         method: 'POST',
         headers: { 'Authorization': `Basic ${credencialesBase64}`, 'Content-Type': 'application/json' }
       });
+      
+      if (!tokenResponse.ok) throw new Error("Fallo en autenticación de COR");
       const tokenData = await tokenResponse.json();
 
       // 2. COR Tasks
@@ -21,11 +23,26 @@ export default async function handler(req, res) {
         method: 'GET',
         headers: { 'Authorization': `Bearer ${tokenData.access_token}`, 'Content-Type': 'application/json' }
       });
+      
+      if (!corResponse.ok) throw new Error("Fallo al leer las tareas de COR");
       const corData = await corResponse.json();
 
-      // 3. Análisis de OpenAI
-      const promptSistema = "Eres el coordinador de tráfico de Ninch. Analiza los datos de carga de trabajo de COR provistos y sugiere de forma breve y justificada a la persona ideal del equipo para asignar la solicitud.";
-      const promptUsuario = `Solicitud ingresada por Slack: "${text}". \n\nDatos de COR: ${JSON.stringify(corData)}`;
+      // 3. Análisis de OpenAI con Prompt optimizado para escenarios múltiples
+      // Calculamos la fecha actual en Argentina para que entienda cuándo es "hoy"
+      const fechaHoy = new Date().toLocaleString('es-AR', { timeZone: 'America/Buenos_Aires' });
+
+      const promptSistema = `Eres el coordinador de tráfico experto de la agencia Ninch. Tienes acceso a los datos de Project COR. Hoy es ${fechaHoy}.
+      
+      Tus REGLAS CRÍTICAS de análisis son:
+      1. COMPRENSIÓN DIRECTA: Si el usuario pide un listado o resumen, entrégalo en viñetas sin sugerir asignaciones. Si pide a quién asignar una tarea, analiza y da un solo nombre justificado.
+      2. EQUIPO CREATIVO: Identifica a este equipo filtrando usuarios cuyos roles o títulos contengan palabras como "Creativo", "Director", "Arte", "Redactor", "Copy", "Diseñador", "Design", o "Audiovisual". Excluye estrictamente a RRHH (People & Organization), Finanzas, y directivos C-Level.
+      3. FILTRO DE ARGENTINA: Si el usuario pide datos de "Argentina", busca en los clientes o usuarios campos, etiquetas o locaciones que coincidan con "AR", "Argentina" o "Buenos Aires".
+      4. FECHAS Y DEADLINES: Usa la fecha actual provista para cruzar con los deadlines de las tareas. Solo muestra lo que corresponde estrictamente al marco temporal solicitado.
+      5. CRITERIO DE ASIGNACIÓN: Cuando debas sugerir a alguien, cruza el filtro de rol + ubicación + disponibilidad (quien tenga más horas libres o menos tareas activas). No asignes tareas operativas a roles de management de RRHH.
+      
+      Mantén el formato limpio, profesional y fácil de leer en Slack.`;
+      
+      const promptUsuario = `Solicitud ingresada por Slack: "${text}". \n\nDatos de COR extraídos en tiempo real: ${JSON.stringify(corData)}`;
 
       const openaiResponse = await fetch('https://api.openai.com/v1/chat/completions', {
         method: 'POST',
@@ -39,6 +56,9 @@ export default async function handler(req, res) {
           temperature: 0.7
         })
       });
+      
+      if (!openaiResponse.ok) throw new Error("Error en la generación de OpenAI");
+      
       const openaiData = await openaiResponse.json();
       const iaResponse = openaiData.choices?.[0]?.message?.content || "No se pudo generar el análisis.";
 
@@ -89,6 +109,6 @@ export default async function handler(req, res) {
   // Respondemos inmediatamente a Slack para que no corte la conexión
   return res.status(200).json({ 
     response_type: "in_channel",
-    text: "⏳ Analizando la carga de trabajo en COR con IA... Esto tomará unos segundos." 
+    text: "⏳ Analizando la carga de trabajo y fechas en COR... Esto tomará unos segundos." 
   });
 }
