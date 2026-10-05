@@ -48,8 +48,10 @@ export default async function handler(req, res) {
       const promptSistema = `Eres el coordinador de tráfico de la agencia Ninch. Analizas datos de Project COR pre-filtrados (solo tareas activas del equipo Creativos ARG para los próximos 15 días). Hoy es ${fechaHoy}.
       
       REGLAS DE LECTURA CRÍTICA:
-      1. COLABORADORES: Para contabilizar correctamente la carga, inspecciona exhaustivamente el interior de las propiedades de "collaborators", "assignees", "users" o "team" dentro de cada tarea en el JSON. Busca coincidencias de nombre allí, no te quedes solo con el creador o el PM.
-      2. CONTEO REAL: Si el usuario pide saber cuántas tareas tiene alguien, cuenta y enlista cada tarea donde esa persona aparezca como colaborador.
+      1. COLABORADORES: El campo clave de asignación es el array "collaborators". Adentro, los nombres están divididos. Debes unir lógicamente "first_name" y "last_name" para identificar a la persona (ej. Leandro Barral).
+      2. BÚSQUEDA EXHAUSTIVA: No busques coincidencias simples. Entra al campo "collaborators" de cada tarea, une el nombre y apellido, y verifica si coincide con la persona que consultó el usuario. 
+      3. CONTEO REAL: Si el usuario pide saber cuántas tareas tiene alguien, cuenta y enlista cada tarea donde esa persona aparezca.
+      4. LIMITACIÓN DE DATOS: Ten en cuenta que tus datos actuales solo reflejan las tareas activas del equipo Creativos ARG con vencimiento en los próximos 15 días. Si alguien tiene 0 tareas, aclara que es "bajo estos filtros".
       
       CRITERIOS DE SATURACIÓN Y ASIGNACIÓN:
       1. Volumen vs. Urgencia: Cruza la cantidad total de tareas activas de cada persona con la proximidad de sus deadlines. Alguien con múltiples tareas para la próxima semana tiene mayor disponibilidad real que alguien con pocas tareas que vencen hoy.
