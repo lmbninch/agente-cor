@@ -18,8 +18,9 @@ export default async function handler(req, res) {
       if (!tokenResponse.ok) throw new Error("Fallo en autenticación de COR");
       const tokenData = await tokenResponse.json();
 
-      // 2. COR Tasks: Descargamos todo (ya que la API ignora fechas)
-      const corResponse = await fetch('https://api.projectcor.com/v1/tasks?archived=2', {
+      // 2. COR Tasks: Forzamos el límite de paginación al máximo para evitar que corte en 20
+      const corUrl = `https://api.projectcor.com/v1/tasks?archived=2&limit=1000&per_page=1000`;
+      const corResponse = await fetch(corUrl, {
         method: 'GET',
         headers: { 'Authorization': `Bearer ${tokenData.access_token}`, 'Content-Type': 'application/json' }
       });
@@ -27,13 +28,10 @@ export default async function handler(req, res) {
       if (!corResponse.ok) throw new Error("Fallo al leer las tareas de COR");
       const corData = await corResponse.json();
 
-      // 3. COMPRESIÓN DE DATOS (El secreto para que la IA no colapse)
-      // Extraemos la lista real de tareas
+      // 3. COMPRESIÓN DE DATOS
       const tasksList = Array.isArray(corData) ? corData : (corData.data || corData.items || []);
       
-      // Mapeamos para dejar un JSON miniatura solo con lo que importa
       const tareasLimpias = tasksList.map(tarea => {
-        // Unimos nombre y apellido nativamente en código
         const asignados = (tarea.collaborators || []).map(c => `${c.first_name || ''} ${c.last_name || ''}`.trim()).join(', ');
         return {
           t: tarea.name || tarea.title || 'Sin título',
@@ -42,7 +40,7 @@ export default async function handler(req, res) {
         };
       });
 
-      // 4. Análisis de OpenAI con los datos comprimidos
+      // 4. Análisis de OpenAI
       const fechaHoy = new Date().toLocaleString('es-AR', { timeZone: 'America/Buenos_Aires' });
 
       const promptSistema = `Eres el coordinador de tráfico de la agencia Ninch. Hoy es ${fechaHoy}.
@@ -51,7 +49,7 @@ export default async function handler(req, res) {
       1. Tienes un listado comprimido de tareas activas. "t" es el título, "d" es el deadline, "c" son los colaboradores asignados.
       2. BÚSQUEDA EXHAUSTIVA: Busca exactamente el nombre solicitado en la propiedad "c" de cada tarea.
       3. CONTEO REAL: Si el usuario pide saber cuántas tareas tiene alguien, cuenta y enlista cada tarea donde esa persona aparezca.
-      4. Si te piden "próximos 15 días", mira la propiedad "d" de las tareas y filtra según la fecha de hoy. Excluye lo que esté fuera de ese rango.
+      4. Si te piden un rango de fechas (ej. "próximos 15 días"), mira la propiedad "d" de las tareas y filtra según la fecha de hoy. Excluye lo que esté fuera de ese rango temporal.
       
       CRITERIOS DE ASIGNACIÓN:
       1. Cruza la cantidad total de tareas activas con la proximidad de deadlines.
@@ -117,6 +115,6 @@ export default async function handler(req, res) {
 
   return res.status(200).json({ 
     response_type: "in_channel",
-    text: "⏳ Descargando y comprimiendo tareas de COR... Esto tomará unos segundos." 
+    text: "⏳ Extrayendo la base de datos completa de COR y analizando... Esto tomará unos segundos." 
   });
 }
