@@ -2,7 +2,7 @@ export default async function handler(req, res) {
   if (req.method !== 'POST') return res.status(405).json({ error: 'Solo POST' });
 
   // =========================================================================
-  // PARTE 1: MODO SEGUNDO PLANO (El webhook se llama a sí mismo para pensar)
+  // PARTE 1: MODO SEGUNDO PLANO
   // =========================================================================
   if (req.body.is_background) {
     try {
@@ -18,23 +18,8 @@ export default async function handler(req, res) {
       if (!tokenResponse.ok) throw new Error("Fallo en autenticación de COR");
       const tokenData = await tokenResponse.json();
 
-      // 2. Cálculo dinámico de fechas (Hoy hasta Hoy + 15 días en formato YYYY-MM-DD)
-      const now = new Date();
-      const formatDate = (date) => {
-        const y = date.getFullYear();
-        const m = String(date.getMonth() + 1).padStart(2, '0');
-        const d = String(date.getDate()).padStart(2, '0');
-        return `${y}-${m}-${d}`;
-      };
-      
-      const startDate = formatDate(now);
-      const futureDate = new Date(now);
-      futureDate.setDate(now.getDate() + 15);
-      const endDate = formatDate(futureDate);
-
-      // 3. COR Tasks: Filtramos por Activas (archived=2) y rango de 15 días (Sin filtro restrictivo de equipo)
-      const corUrl = `https://api.projectcor.com/v1/tasks?archived=2&start=${startDate}&end=${endDate}`;
-      const corResponse = await fetch(corUrl, {
+      // 2. COR Tasks: Descargamos todo (ya que la API ignora fechas)
+      const corResponse = await fetch('https://api.projectcor.com/v1/tasks?archived=2', {
         method: 'GET',
         headers: { 'Authorization': `Bearer ${tokenData.access_token}`, 'Content-Type': 'application/json' }
       });
@@ -42,25 +27,39 @@ export default async function handler(req, res) {
       if (!corResponse.ok) throw new Error("Fallo al leer las tareas de COR");
       const corData = await corResponse.json();
 
-      // 4. Análisis de OpenAI con Prompt optimizado
-      const fechaHoy = now.toLocaleString('es-AR', { timeZone: 'America/Buenos_Aires' });
+      // 3. COMPRESIÓN DE DATOS (El secreto para que la IA no colapse)
+      // Extraemos la lista real de tareas
+      const tasksList = Array.isArray(corData) ? corData : (corData.data || corData.items || []);
+      
+      // Mapeamos para dejar un JSON miniatura solo con lo que importa
+      const tareasLimpias = tasksList.map(tarea => {
+        // Unimos nombre y apellido nativamente en código
+        const asignados = (tarea.collaborators || []).map(c => `${c.first_name || ''} ${c.last_name || ''}`.trim()).join(', ');
+        return {
+          t: tarea.name || tarea.title || 'Sin título',
+          d: tarea.deadline || 'Sin fecha',
+          c: asignados
+        };
+      });
 
-      const promptSistema = `Eres el coordinador de tráfico de la agencia Ninch. Analizas datos de Project COR pre-filtrados (solo tareas activas de la agencia para los próximos 15 días). Hoy es ${fechaHoy}.
+      // 4. Análisis de OpenAI con los datos comprimidos
+      const fechaHoy = new Date().toLocaleString('es-AR', { timeZone: 'America/Buenos_Aires' });
+
+      const promptSistema = `Eres el coordinador de tráfico de la agencia Ninch. Hoy es ${fechaHoy}.
       
       REGLAS DE LECTURA CRÍTICA:
-      1. COLABORADORES: El campo clave de asignación es el array "collaborators". Adentro, los nombres están divididos. Debes unir lógicamente "first_name" y "last_name" para identificar a la persona (ej. Leandro Barral).
-      2. BÚSQUEDA EXHAUSTIVA: No busques coincidencias simples. Entra al campo "collaborators" de cada tarea, une el nombre y apellido, y verifica si coincide con la persona que consultó el usuario. 
+      1. Tienes un listado comprimido de tareas activas. "t" es el título, "d" es el deadline, "c" son los colaboradores asignados.
+      2. BÚSQUEDA EXHAUSTIVA: Busca exactamente el nombre solicitado en la propiedad "c" de cada tarea.
       3. CONTEO REAL: Si el usuario pide saber cuántas tareas tiene alguien, cuenta y enlista cada tarea donde esa persona aparezca.
-      4. LIMITACIÓN DE DATOS: Ten en cuenta que tus datos actuales solo reflejan las tareas activas con vencimiento en los próximos 15 días. Si alguien tiene 0 tareas, aclara que es "bajo estos filtros de 15 días".
+      4. Si te piden "próximos 15 días", mira la propiedad "d" de las tareas y filtra según la fecha de hoy. Excluye lo que esté fuera de ese rango.
       
-      CRITERIOS DE SATURACIÓN Y ASIGNACIÓN:
-      1. Volumen vs. Urgencia: Cruza la cantidad total de tareas activas de cada persona con la proximidad de sus deadlines. Alguien con múltiples tareas para la próxima semana tiene mayor disponibilidad real que alguien con pocas tareas que vencen hoy.
-      2. Filtro de Roles: Excluye permanentemente a RRHH (People & Organization), Finanzas y C-Level para tareas operativas, sin importar su disponibilidad aparente.
-      3. EQUIPO CREATIVO: Si el usuario pide asignar a alguien de perfil creativo, busca en los roles de los colaboradores palabras como "Creativo", "Director", "Arte", "Redactor", "Copy" o "Diseñador".
+      CRITERIOS DE ASIGNACIÓN:
+      1. Cruza la cantidad total de tareas activas con la proximidad de deadlines.
+      2. Excluye permanentemente a RRHH, Finanzas y C-Level para tareas operativas.
       
-      Formato: Si se solicita un listado, devuélvelo en viñetas incluyendo el nombre de la tarea/proyecto y el deadline específico.`;
+      Devuelve la respuesta en viñetas incluyendo el nombre de la tarea y el deadline.`;
       
-      const promptUsuario = `Solicitud ingresada por Slack: "${text}". \n\nDatos de COR extraídos en tiempo real: ${JSON.stringify(corData)}`;
+      const promptUsuario = `Solicitud: "${text}". \n\nDatos de COR comprimidos: ${JSON.stringify(tareasLimpias)}`;
 
       const openaiResponse = await fetch('https://api.openai.com/v1/chat/completions', {
         method: 'POST',
@@ -76,11 +75,10 @@ export default async function handler(req, res) {
       });
       
       if (!openaiResponse.ok) throw new Error("Error en la generación de OpenAI");
-      
       const openaiData = await openaiResponse.json();
       const iaResponse = openaiData.choices?.[0]?.message?.content || "No se pudo generar el análisis.";
 
-      // 5. Enviar respuesta final a Slack
+      // 5. Enviar a Slack
       await fetch(response_url, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -100,33 +98,25 @@ export default async function handler(req, res) {
   }
 
   // =========================================================================
-  // PARTE 2: MODO SLACK (Respuesta instantánea para evitar el timeout)
+  // PARTE 2: MODO SLACK (Respuesta instantánea)
   // =========================================================================
   const userMessage = req.body.text;
   const responseUrl = req.body.response_url;
 
-  // Obtenemos la URL de nuestro propio webhook en Vercel
   const protocol = req.headers['x-forwarded-proto'] || 'https';
   const host = req.headers['host'];
   const selfUrl = `${protocol}://${host}/api/webhook`;
 
-  // Nos auto-llamamos en segundo plano pasándole los datos
   fetch(selfUrl, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      is_background: true,
-      text: userMessage,
-      response_url: responseUrl
-    })
+    body: JSON.stringify({ is_background: true, text: userMessage, response_url: responseUrl })
   }).catch(console.error);
 
-  // Le damos 50 milisegundos para asegurar que el request de fondo salga de Vercel
   await new Promise(resolve => setTimeout(resolve, 50));
 
-  // Respondemos inmediatamente a Slack para que no corte la conexión
   return res.status(200).json({ 
     response_type: "in_channel",
-    text: "⏳ Analizando la carga de trabajo general en COR... Esto tomará unos segundos." 
+    text: "⏳ Descargando y comprimiendo tareas de COR... Esto tomará unos segundos." 
   });
 }
