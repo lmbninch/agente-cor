@@ -32,8 +32,8 @@ export default async function handler(req, res) {
       futureDate.setDate(now.getDate() + 15);
       const endDate = formatDate(futureDate);
 
-      // 3. COR Tasks: Filtramos por Activas (archived=2), Creativos ARG (team=31010) y rango de 15 días
-      const corUrl = `https://api.projectcor.com/v1/tasks?archived=2&team=31010&start=${startDate}&end=${endDate}`;
+      // 3. COR Tasks: Filtramos por Activas (archived=2) y rango de 15 días (Sin filtro restrictivo de equipo)
+      const corUrl = `https://api.projectcor.com/v1/tasks?archived=2&start=${startDate}&end=${endDate}`;
       const corResponse = await fetch(corUrl, {
         method: 'GET',
         headers: { 'Authorization': `Bearer ${tokenData.access_token}`, 'Content-Type': 'application/json' }
@@ -45,17 +45,18 @@ export default async function handler(req, res) {
       // 4. Análisis de OpenAI con Prompt optimizado
       const fechaHoy = now.toLocaleString('es-AR', { timeZone: 'America/Buenos_Aires' });
 
-      const promptSistema = `Eres el coordinador de tráfico de la agencia Ninch. Analizas datos de Project COR pre-filtrados (solo tareas activas del equipo Creativos ARG para los próximos 15 días). Hoy es ${fechaHoy}.
+      const promptSistema = `Eres el coordinador de tráfico de la agencia Ninch. Analizas datos de Project COR pre-filtrados (solo tareas activas de la agencia para los próximos 15 días). Hoy es ${fechaHoy}.
       
       REGLAS DE LECTURA CRÍTICA:
       1. COLABORADORES: El campo clave de asignación es el array "collaborators". Adentro, los nombres están divididos. Debes unir lógicamente "first_name" y "last_name" para identificar a la persona (ej. Leandro Barral).
       2. BÚSQUEDA EXHAUSTIVA: No busques coincidencias simples. Entra al campo "collaborators" de cada tarea, une el nombre y apellido, y verifica si coincide con la persona que consultó el usuario. 
       3. CONTEO REAL: Si el usuario pide saber cuántas tareas tiene alguien, cuenta y enlista cada tarea donde esa persona aparezca.
-      4. LIMITACIÓN DE DATOS: Ten en cuenta que tus datos actuales solo reflejan las tareas activas del equipo Creativos ARG con vencimiento en los próximos 15 días. Si alguien tiene 0 tareas, aclara que es "bajo estos filtros".
+      4. LIMITACIÓN DE DATOS: Ten en cuenta que tus datos actuales solo reflejan las tareas activas con vencimiento en los próximos 15 días. Si alguien tiene 0 tareas, aclara que es "bajo estos filtros de 15 días".
       
       CRITERIOS DE SATURACIÓN Y ASIGNACIÓN:
       1. Volumen vs. Urgencia: Cruza la cantidad total de tareas activas de cada persona con la proximidad de sus deadlines. Alguien con múltiples tareas para la próxima semana tiene mayor disponibilidad real que alguien con pocas tareas que vencen hoy.
       2. Filtro de Roles: Excluye permanentemente a RRHH (People & Organization), Finanzas y C-Level para tareas operativas, sin importar su disponibilidad aparente.
+      3. EQUIPO CREATIVO: Si el usuario pide asignar a alguien de perfil creativo, busca en los roles de los colaboradores palabras como "Creativo", "Director", "Arte", "Redactor", "Copy" o "Diseñador".
       
       Formato: Si se solicita un listado, devuélvelo en viñetas incluyendo el nombre de la tarea/proyecto y el deadline específico.`;
       
@@ -126,6 +127,6 @@ export default async function handler(req, res) {
   // Respondemos inmediatamente a Slack para que no corte la conexión
   return res.status(200).json({ 
     response_type: "in_channel",
-    text: "⏳ Analizando la carga de trabajo del equipo creativo en COR... Esto tomará unos segundos." 
+    text: "⏳ Analizando la carga de trabajo general en COR... Esto tomará unos segundos." 
   });
 }
