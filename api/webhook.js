@@ -9,54 +9,30 @@ export default async function handler(req, res) {
       const { text, response_url } = req.body;
       const textoLower = text.toLowerCase();
 
-      // 1. DIRECTORIO OFICIAL DEL EQUIPO CREATIVO (IDs exactos de COR)
+      // 1. DIRECTORIO OFICIAL DEL EQUIPO CREATIVO
       const DIRECTORIO_CREATIVO = {
-        "nasa": 103413,
-        "lombardo": 103413,
+        "nasa": 103413, "lombardo": 103413,
         "agustina perez": 103414,
-        "carolina": 103421,
-        "dorso": 103421,
-        "vanesa": 103434,
-        "copes": 103434,
-        "mercedes": 103436,
-        "palumbo": 103436,
-        "lucas": 103439,
-        "vega": 103439,
-        "candela jordi": 103441,
-        "jordi": 103441,
-        "joi": 103443,
-        "sanchez": 103443,
-        "demian": 103453,
-        "buezas": 103453,
-        "julieta": 103455,
-        "lamarque": 103455,
-        "agustina carro": 103467,
-        "carro": 103467,
-        "candela dallocchio": 103468,
-        "dallocchio": 103468,
-        "ignacio": 103477,
-        "cairola": 103477,
-        "sol": 103479,
-        "rodriguez": 103479,
-        "escudero": 103479,
-        "leandro": 103480,
-        "lean": 103480,
-        "barral": 103480,
-        "federico": 103481,
-        "fede": 103481,
-        "martinez": 103481,
-        "matilda": 103486,
-        "brero": 103486,
-        "joaquin": 104457,
-        "baez": 104457,
-        "ana": 104458,
-        "paula": 104458,
-        "barel": 104458,
-        "milagros": 104459,
-        "garcia": 104459
+        "carolina": 103421, "dorso": 103421,
+        "vanesa": 103434, "copes": 103434,
+        "mercedes": 103436, "palumbo": 103436,
+        "lucas": 103439, "vega": 103439,
+        "candela jordi": 103441, "jordi": 103441,
+        "joi": 103443, "sanchez": 103443,
+        "demian": 103453, "buezas": 103453,
+        "julieta": 103455, "lamarque": 103455,
+        "agustina carro": 103467, "carro": 103467,
+        "candela dallocchio": 103468, "dallocchio": 103468,
+        "ignacio": 103477, "cairola": 103477,
+        "sol": 103479, "rodriguez": 103479, "escudero": 103479,
+        "leandro": 103480, "lean": 103480, "barral": 103480,
+        "federico": 103481, "fede": 103481, "martinez": 103481,
+        "matilda": 103486, "brero": 103486,
+        "joaquin": 104457, "baez": 104457,
+        "ana": 104458, "paula": 104458, "barel": 104458,
+        "milagros": 104459, "garcia": 104459
       };
 
-      // Detectamos qué nombres o apellidos mencionó el usuario en Slack
       let idsABuscar = [];
       for (const [clave, id] of Object.entries(DIRECTORIO_CREATIVO)) {
         if (textoLower.includes(clave) && !idsABuscar.includes(id)) {
@@ -74,7 +50,7 @@ export default async function handler(req, res) {
       if (!tokenResponse.ok) throw new Error("Fallo en autenticación de COR");
       const tokenData = await tokenResponse.json();
 
-      // 3. EXTRACCIÓN QUIRÚRGICA: Consultamos la API v2 para cada ID detectado
+      // 3. EXTRACCIÓN QUIRÚRGICA POR ID
       let allTasks = [];
 
       if (idsABuscar.length > 0) {
@@ -95,39 +71,68 @@ export default async function handler(req, res) {
           }
         }
       } else {
-        // Si no menciona a nadie específico, avisamos en la respuesta
         await fetch(response_url, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ response_type: "in_channel", text: "⚠️ Por favor, menciona al menos a un integrante del equipo creativo en tu consulta." })
+          body: JSON.stringify({ response_type: "in_channel", text: "⚠️ Por favor, menciona al menos a un integrante del equipo creativo." })
         });
         return res.status(200).json({ success: true });
       }
 
-      // 4. COMPRESIÓN DE DATOS
+      // 4. LIMPIEZA Y COMPRESIÓN (Filtro de estados y extracción de subtareas)
       const tasksUnicas = Array.from(new Map(allTasks.map(task => [task.id, task])).values());
+      const tareasLimpias = [];
 
-      const tareasLimpias = tasksUnicas.map(tarea => {
+      tasksUnicas.forEach(tarea => {
+        // FILTRO DE TAREAS FINALIZADAS
+        const statusName = (tarea.status && tarea.status.name) ? tarea.status.name.toLowerCase() : '';
+        const currentStatus = (tarea.current_status && tarea.current_status.name) ? tarea.current_status.name.toLowerCase() : '';
+        const combinedStatus = `${statusName} ${currentStatus}`;
+        
+        // Si el estado contiene palabras de cierre, saltamos esta tarea y no la sumamos a la lista
+        if (combinedStatus.includes('finalizad') || combinedStatus.includes('completad') || combinedStatus.includes('done')) {
+          return; 
+        }
+
         const cols = (tarea.collaborators || []).map(c => `${c.first_name || ''} ${c.last_name || ''}`.trim());
         const pm = tarea.pm ? `${tarea.pm.first_name || ''} ${tarea.pm.last_name || ''}`.trim() : '';
         const involucrados = [...new Set([...cols, pm].filter(Boolean))].join(', ');
 
-        return {
+        tareasLimpias.push({
           t: tarea.name || tarea.title || 'Sin título',
           d: tarea.deadline || 'Sin fecha',
           p: involucrados
-        };
+        });
+
+        // EXTRACCIÓN DE SUBTAREAS (Si COR las envía anidadas)
+        if (tarea.subtasks && Array.isArray(tarea.subtasks)) {
+          tarea.subtasks.forEach(sub => {
+            const subStatus = (sub.status && sub.status.name) ? sub.status.name.toLowerCase() : '';
+            if (subStatus.includes('finalizad') || subStatus.includes('completad') || subStatus.includes('done')) return;
+
+            const subCols = (sub.collaborators || []).map(c => `${c.first_name || ''} ${c.last_name || ''}`.trim());
+            const subInvolucrados = [...new Set([...subCols].filter(Boolean))].join(', ');
+            
+            if (subInvolucrados) {
+              tareasLimpias.push({
+                t: `[Subtarea] ${sub.name || sub.title || 'Sin título'} (de: ${tarea.name || tarea.title})`,
+                d: sub.deadline || tarea.deadline || 'Sin fecha',
+                p: subInvolucrados
+              });
+            }
+          });
+        }
       });
 
-      // 5. Análisis de OpenAI con Criterio de Tráfico
+      // 5. Análisis de OpenAI
       const fechaHoy = new Date().toLocaleString('es-AR', { timeZone: 'America/Buenos_Aires' });
 
       const promptSistema = `Eres el coordinador de tráfico experto de la agencia Ninch. Hoy es ${fechaHoy}.
       
       REGLAS DE ANÁLISIS:
-      1. Recibes un listado limpio de tareas extraídas directamente de la base de datos para los colaboradores consultados ("t" = título, "d" = deadline, "p" = personas asignadas).
-      2. CRITERIO DE DISPONIBILIDAD: Contrasta el volumen de tareas activas de cada persona con la cercanía de los deadlines para evaluar quién está más libre o saturado.
-      3. FORMATO: Presenta un reporte ejecutivo en viñetas detallando las tareas y deadlines de cada persona mencionada, y cierra obligatoriamente con un veredicto claro y justificado sobre **quién está más libre** para tomar un nuevo proyecto.`;
+      1. Recibes un listado limpio de tareas activas reales ("t" = título, "d" = deadline, "p" = personas asignadas). Las tareas finalizadas ya fueron removidas.
+      2. CRITERIO DE DISPONIBILIDAD: Contrasta el volumen de tareas activas de cada persona con la cercanía de los deadlines. Identifica claramente si son tareas principales o [Subtareas].
+      3. FORMATO: Presenta un reporte ejecutivo en viñetas detallando las tareas y deadlines de cada persona mencionada. Cierra con un veredicto justificado sobre quién está más libre para tomar un nuevo proyecto.`;
       
       const promptUsuario = `Solicitud en Slack: "${text}". \n\nDatos reales extraídos de COR: ${JSON.stringify(tareasLimpias)}`;
 
@@ -187,6 +192,6 @@ export default async function handler(req, res) {
 
   return res.status(200).json({ 
     response_type: "in_channel",
-    text: "⏳ Consultando las tareas del equipo creativo en COR... Esto tomará unos segundos." 
+    text: "⏳ Limpiando tareas finalizadas y buscando subtareas en COR... Esto tomará unos segundos." 
   });
 }
