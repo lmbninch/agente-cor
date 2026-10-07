@@ -79,19 +79,36 @@ export default async function handler(req, res) {
         return res.status(200).json({ success: true });
       }
 
-      // 4. LIMPIEZA Y COMPRESIÓN (Filtro de estados y extracción de subtareas)
+      // 4. LIMPIEZA CON ESCUDOS DE TIEMPO
       const tasksUnicas = Array.from(new Map(allTasks.map(task => [task.id, task])).values());
       const tareasLimpias = [];
+      
+      const now = new Date();
+      const limiteFantasma = new Date();
+      limiteFantasma.setDate(now.getDate() - 15); // Fecha límite: 15 días atrás
 
       tasksUnicas.forEach(tarea => {
-        // FILTRO DE TAREAS FINALIZADAS
+        // Filtro de estados expandido
         const statusName = (tarea.status && tarea.status.name) ? tarea.status.name.toLowerCase() : '';
         const currentStatus = (tarea.current_status && tarea.current_status.name) ? tarea.current_status.name.toLowerCase() : '';
         const combinedStatus = `${statusName} ${currentStatus}`;
         
-        // Si el estado contiene palabras de cierre, saltamos esta tarea y no la sumamos a la lista
-        if (combinedStatus.includes('finalizad') || combinedStatus.includes('completad') || combinedStatus.includes('done')) {
+        if (combinedStatus.includes('finalizad') || combinedStatus.includes('completad') || combinedStatus.includes('done') || combinedStatus.includes('aprobada') || combinedStatus.includes('entregada')) {
           return; 
+        }
+
+        // Motor de fechas principal
+        let deadlineStr = tarea.deadline || 'Sin fecha';
+        if (tarea.deadline) {
+          const dateDeadline = new Date(tarea.deadline);
+          
+          // Escudo 1: Si venció hace más de 15 días, la borramos (tarea fantasma)
+          if (dateDeadline < limiteFantasma) return;
+          
+          // Escudo 2: Si ya pasó la fecha de hoy, la marcamos
+          if (dateDeadline < now) {
+            deadlineStr = `[VENCIDA] ${deadlineStr}`;
+          }
         }
 
         const cols = (tarea.collaborators || []).map(c => `${c.first_name || ''} ${c.last_name || ''}`.trim());
@@ -100,15 +117,24 @@ export default async function handler(req, res) {
 
         tareasLimpias.push({
           t: tarea.name || tarea.title || 'Sin título',
-          d: tarea.deadline || 'Sin fecha',
+          d: deadlineStr,
           p: involucrados
         });
 
-        // EXTRACCIÓN DE SUBTAREAS (Si COR las envía anidadas)
+        // Motor de fechas para subtareas
         if (tarea.subtasks && Array.isArray(tarea.subtasks)) {
           tarea.subtasks.forEach(sub => {
             const subStatus = (sub.status && sub.status.name) ? sub.status.name.toLowerCase() : '';
-            if (subStatus.includes('finalizad') || subStatus.includes('completad') || subStatus.includes('done')) return;
+            if (subStatus.includes('finalizad') || subStatus.includes('completad') || subStatus.includes('done') || subStatus.includes('aprobada')) return;
+
+            let subDeadlineStr = sub.deadline || tarea.deadline || 'Sin fecha';
+            if (subDeadlineStr !== 'Sin fecha') {
+              const sDate = new Date(subDeadlineStr);
+              if (sDate < limiteFantasma) return;
+              if (sDate < now) {
+                subDeadlineStr = `[VENCIDA] ${subDeadlineStr}`;
+              }
+            }
 
             const subCols = (sub.collaborators || []).map(c => `${c.first_name || ''} ${c.last_name || ''}`.trim());
             const subInvolucrados = [...new Set([...subCols].filter(Boolean))].join(', ');
@@ -116,7 +142,7 @@ export default async function handler(req, res) {
             if (subInvolucrados) {
               tareasLimpias.push({
                 t: `[Subtarea] ${sub.name || sub.title || 'Sin título'} (de: ${tarea.name || tarea.title})`,
-                d: sub.deadline || tarea.deadline || 'Sin fecha',
+                d: subDeadlineStr,
                 p: subInvolucrados
               });
             }
@@ -124,17 +150,17 @@ export default async function handler(req, res) {
         }
       });
 
-      // 5. Análisis de OpenAI
+      // 5. Análisis de OpenAI con consciencia temporal
       const fechaHoy = new Date().toLocaleString('es-AR', { timeZone: 'America/Buenos_Aires' });
 
-      const promptSistema = `Eres el coordinador de tráfico experto de la agencia Ninch. Hoy es ${fechaHoy}.
+      const promptSistema = `Eres el coordinador de tráfico de la agencia Ninch. Hoy es exactamente ${fechaHoy}.
       
-      REGLAS DE ANÁLISIS:
-      1. Recibes un listado limpio de tareas activas reales ("t" = título, "d" = deadline, "p" = personas asignadas). Las tareas finalizadas ya fueron removidas.
-      2. CRITERIO DE DISPONIBILIDAD: Contrasta el volumen de tareas activas de cada persona con la cercanía de los deadlines. Identifica claramente si son tareas principales o [Subtareas].
-      3. FORMATO: Presenta un reporte ejecutivo en viñetas detallando las tareas y deadlines de cada persona mencionada. Cierra con un veredicto justificado sobre quién está más libre para tomar un nuevo proyecto.`;
+      REGLAS CRÍTICAS DE TIEMPO:
+      1. Si una tarea dice "[VENCIDA]", significa que su fecha límite ya pasó. NO digas que "se acerca rápidamente" ni que es una urgencia a futuro. Trátala como una tarea atrasada.
+      2. Contrasta el volumen de tareas activas con la cercanía real de los deadlines a la fecha de hoy para evaluar disponibilidad.
+      3. Presenta un reporte en viñetas detallando las tareas. Cierra con un veredicto claro sobre si la persona está libre u ocupada.`;
       
-      const promptUsuario = `Solicitud en Slack: "${text}". \n\nDatos reales extraídos de COR: ${JSON.stringify(tareasLimpias)}`;
+      const promptUsuario = `Solicitud en Slack: "${text}". \n\nDatos reales (tareas muy viejas fueron removidas): ${JSON.stringify(tareasLimpias)}`;
 
       const openaiResponse = await fetch('https://api.openai.com/v1/chat/completions', {
         method: 'POST',
@@ -192,6 +218,6 @@ export default async function handler(req, res) {
 
   return res.status(200).json({ 
     response_type: "in_channel",
-    text: "⏳ Limpiando tareas finalizadas y buscando subtareas en COR... Esto tomará unos segundos." 
+    text: "⏳ Limpiando tareas fantasma y calculando fechas de entrega reales... Esto tomará unos segundos." 
   });
 }
