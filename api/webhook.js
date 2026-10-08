@@ -166,4 +166,97 @@ export default async function handler(req, res) {
 
             if (asignadosSub.length > 0 && validSubTime) {
               tareasLimpias.push({
-                u: asignadosSub
+                u: asignadosSub.join(" y "),
+                c: contextoProyecto,
+                t: `[Subtarea] ${sub.name || sub.title || 'Sin título'}`,
+                d: subDeadlineStr
+              });
+            }
+          });
+        }
+      });
+
+      const tareasFinales = Array.from(new Set(tareasLimpias.map(JSON.stringify))).map(JSON.parse);
+
+      // 4. Análisis de OpenAI CON REGLAS BLINDADAS
+      const fechaHoy = new Date().toLocaleString('es-AR', { timeZone: 'America/Buenos_Aires' });
+
+      const promptSistema = `Eres el coordinador de tráfico de la agencia Ninch. Hoy es ${fechaHoy}.
+      
+      REGLA DE ORO INQUEBRANTABLE:
+      Sin importar cómo formule la pregunta el usuario (incluso si solo dice "cuántas" o "quién"), ESTÁS OBLIGADO A MOSTRAR EL LISTADO COMPLETO de tareas. NUNCA respondas con un simple resumen de una oración.
+      
+      ESTRUCTURA QUE DEBES CUMPLIR OBLIGATORIAMENTE:
+      Para CADA persona mencionada en los datos (fíjate en la etiqueta "u" de cada tarea):
+      1. Pon el nombre de la persona como título principal.
+      2. Subdivide sus tareas en "TAREAS ACTIVAS" (fecha "d" NO contiene "[VENCIDA]") y "TAREAS VENCIDAS" (fecha "d" CONTIENE "[VENCIDA]").
+      
+      REGLAS DE FORMATO POR TAREA:
+      - Usa este formato exacto: **[Cliente > Proyecto] Título** | Vencimiento: Fecha
+      - PROHIBIDO inventar tareas o listar a los participantes en las viñetas.
+      
+      CIERRE:
+      - Recuento numérico general.
+      - "### Veredicto de Disponibilidad": Escribe un párrafo completo y analítico comparando la carga de trabajo de los involucrados para justificar quién está más libre para un nuevo proyecto.`;
+      
+      const promptUsuario = `Solicitud original: "${text}". \n\nDatos reales (TIENES QUE MOSTRAR EL LISTADO OBLIGATORIAMENTE AGRUPADO POR LA ETIQUETA "u"): ${JSON.stringify(tareasFinales)}`;
+
+      const openaiResponse = await fetch('https://api.openai.com/v1/chat/completions', {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${process.env.OPENAI_API_KEY}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          model: "gpt-4o-mini",
+          messages: [
+            { role: "system", content: promptSistema },
+            { role: "user", content: promptUsuario }
+          ],
+          temperature: 0.6 
+        })
+      });
+      
+      if (!openaiResponse.ok) throw new Error("Error en la generación de OpenAI");
+      const openaiData = await openaiResponse.json();
+      const iaResponse = openaiData.choices?.[0]?.message?.content || "No se pudo generar el análisis.";
+
+      // 5. Enviar a Slack
+      await fetch(response_url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ response_type: "in_channel", text: iaResponse })
+      });
+
+      return res.status(200).json({ success: true });
+    } catch (error) {
+      console.error("Error en background:", error);
+      await fetch(req.body.response_url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ response_type: "in_channel", text: `❌ Error procesando los datos: ${error.message}` })
+      });
+      return res.status(500).json({ error: error.message });
+    }
+  }
+
+  // =========================================================================
+  // PARTE 2: MODO SLACK (Respuesta instantánea)
+  // =========================================================================
+  const userMessage = req.body.text;
+  const responseUrl = req.body.response_url;
+
+  const protocol = req.headers['x-forwarded-proto'] || 'https';
+  const host = req.headers['host'];
+  const selfUrl = `${protocol}://${host}/api/webhook`;
+
+  fetch(selfUrl, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ is_background: true, text: userMessage, response_url: responseUrl })
+  }).catch(console.error);
+
+  await new Promise(resolve => setTimeout(resolve, 50));
+
+  return res.status(200).json({ 
+    response_type: "in_channel",
+    text: "⏳ Acelerando consultas en paralelo y generando listado... Esto tomará unos segundos." 
+  });
+}
