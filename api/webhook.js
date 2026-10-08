@@ -53,38 +53,26 @@ export default async function handler(req, res) {
       let allTasks = [];
 
       if (idsABuscar.length > 0) {
-        // A. BÚSQUEDA QUIRÚRGICA EN PARALELO (Turbo)
-        const surgicalPromises = idsABuscar.map(id => {
-          const filterObj = { collaborator: id };
-          const filterStr = encodeURIComponent(JSON.stringify(filterObj));
-          const corUrl = `https://api.projectcor.com/v2/tasks?archived=2&per_page=100&filters=${filterStr}`;
-          return fetch(corUrl, {
-            method: 'GET',
-            headers: { 'Authorization': `Bearer ${tokenData.access_token}`, 'Content-Type': 'application/json' }
-          }).then(res => res.ok ? res.json() : { data: [] }).catch(() => ({ data: [] }));
-        });
-
-        const surgicalResults = await Promise.all(surgicalPromises);
-        surgicalResults.forEach(corData => {
-          const tasksList = Array.isArray(corData) ? corData : (corData.data || corData.items || []);
-          allTasks = allTasks.concat(tasksList);
-        });
-
-        // B. RED DE ARRASTRE PROFUNDA EN PARALELO (Las 10 páginas al mismo tiempo)
         const fetchPromises = [];
-        for (let page = 1; page <= 10; page++) {
-          const genUrl = `https://api.projectcor.com/v2/tasks?archived=2&per_page=100&page=${page}`;
-          fetchPromises.push(
-            fetch(genUrl, {
-              method: 'GET',
-              headers: { 'Authorization': `Bearer ${tokenData.access_token}`, 'Content-Type': 'application/json' }
-            }).then(res => res.ok ? res.json() : { data: [] }).catch(() => ({ data: [] }))
-          );
+        const reqOpts = { method: 'GET', headers: { 'Authorization': `Bearer ${tokenData.access_token}`, 'Content-Type': 'application/json' } };
+
+        // A. ATAQUE QUIRÚRGICO MÚLTIPLE (v2 y v1 combinados)
+        idsABuscar.forEach(id => {
+          const filterStr = encodeURIComponent(JSON.stringify({ collaborator: id }));
+          fetchPromises.push(fetch(`https://api.projectcor.com/v2/tasks?archived=2&per_page=100&filters=${filterStr}`, reqOpts).then(r => r.ok ? r.json() : { data: [] }).catch(() => ({ data: [] })));
+          // Respaldo v1
+          fetchPromises.push(fetch(`https://api.projectcor.com/v1/tasks?collaborator_id=${id}&per_page=100`, reqOpts).then(r => r.ok ? r.json() : { data: [] }).catch(() => ({ data: [] })));
+        });
+
+        // B. RED DE ARRASTRE ORDENADA POR ACTUALIZACIÓN RECIENTE
+        for (let page = 1; page <= 6; page++) {
+          fetchPromises.push(fetch(`https://api.projectcor.com/v2/tasks?archived=2&per_page=100&page=${page}`, reqOpts).then(r => r.ok ? r.json() : { data: [] }).catch(() => ({ data: [] })));
+          fetchPromises.push(fetch(`https://api.projectcor.com/v2/tasks?archived=2&per_page=100&page=${page}&sort=updated_at&direction=desc`, reqOpts).then(r => r.ok ? r.json() : { data: [] }).catch(() => ({ data: [] })));
         }
-        
+
         const pagesResults = await Promise.all(fetchPromises);
-        pagesResults.forEach(genData => {
-          const tasksList = Array.isArray(genData) ? genData : (genData.data || genData.items || []);
+        pagesResults.forEach(data => {
+          const tasksList = Array.isArray(data) ? data : (data.data || data.items || []);
           allTasks = allTasks.concat(tasksList);
         });
 
@@ -97,7 +85,7 @@ export default async function handler(req, res) {
         return res.status(200).json({ success: true });
       }
 
-      // 3. LIMPIEZA Y CLASIFICACIÓN
+      // 3. LIMPIEZA, DETECCIÓN TEXTUAL Y CLASIFICACIÓN
       const tasksUnicas = Array.from(new Map(allTasks.map(task => [task.id, task])).values());
       const tareasLimpias = [];
       
@@ -110,10 +98,16 @@ export default async function handler(req, res) {
         const clientName = tarea.project?.client?.name || tarea.client?.name || '';
         const contextoProyecto = clientName ? `[${clientName} > ${projectName}]` : `[${projectName}]`;
 
-        const statusName = (tarea.status && tarea.status.name) ? tarea.status.name.toLowerCase() : '';
-        const currentStatus = (tarea.current_status && tarea.current_status.name) ? tarea.current_status.name.toLowerCase() : '';
-        const combinedStatus = `${statusName} ${currentStatus}`;
+        // Lector adaptativo de estados (String u Objeto)
+        let statusName = '';
+        if (typeof tarea.status === 'string') statusName = tarea.status.toLowerCase();
+        else if (tarea.status && tarea.status.name) statusName = tarea.status.name.toLowerCase();
         
+        let currentStatus = '';
+        if (typeof tarea.current_status === 'string') currentStatus = tarea.current_status.toLowerCase();
+        else if (tarea.current_status && tarea.current_status.name) currentStatus = tarea.current_status.name.toLowerCase();
+
+        const combinedStatus = `${statusName} ${currentStatus}`;
         const isParentFinished = combinedStatus.includes('finalizad') || combinedStatus.includes('completad') || combinedStatus.includes('done') || combinedStatus.includes('aprobada') || combinedStatus.includes('entregada');
 
         let deadlineStr = tarea.deadline || 'Sin fecha';
@@ -137,18 +131,25 @@ export default async function handler(req, res) {
         }
 
         if (asignadosParent.length > 0 && !isParentFinished && validParentTime) {
+          // Detecta si la tarea general obtenida es en realidad una subtarea devuelta por la v1
+          const isActuallySubtask = tarea.task_father || tarea.parent_id;
+          const taskTypeLabel = isActuallySubtask ? '[Subtarea]' : '[Tarea]';
           tareasLimpias.push({
             u: asignadosParent.join(" y "), 
             c: contextoProyecto,
-            t: `[Tarea] ${tarea.name || tarea.title || 'Sin título'}`,
+            t: `${taskTypeLabel} ${tarea.name || tarea.title || 'Sin título'}`,
             d: deadlineStr
           });
         }
 
+        // Subtareas anidadas
         if (tarea.subtasks && Array.isArray(tarea.subtasks)) {
           tarea.subtasks.forEach(sub => {
-            const subStatus = (sub.status && sub.status.name) ? sub.status.name.toLowerCase() : '';
-            if (subStatus.includes('finalizad') || subStatus.includes('completad') || subStatus.includes('done') || subStatus.includes('aprobada') || subStatus.includes('entregada')) return;
+            let subStatusName = '';
+            if (typeof sub.status === 'string') subStatusName = sub.status.toLowerCase();
+            else if (sub.status && sub.status.name) subStatusName = sub.status.name.toLowerCase();
+
+            if (subStatusName.includes('finalizad') || subStatusName.includes('completad') || subStatusName.includes('done') || subStatusName.includes('aprobada') || subStatusName.includes('entregada')) return;
 
             let subDeadlineStr = sub.deadline || tarea.deadline || 'Sin fecha';
             let validSubTime = true;
@@ -257,6 +258,6 @@ export default async function handler(req, res) {
 
   return res.status(200).json({ 
     response_type: "in_channel",
-    text: "⏳ Acelerando consultas en paralelo y generando listado... Esto tomará unos segundos." 
+    text: "⏳ Buscando tareas asignadas... Esto tomará unos segundos." 
   });
 }
