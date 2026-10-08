@@ -79,16 +79,16 @@ export default async function handler(req, res) {
         return res.status(200).json({ success: true });
       }
 
-      // 4. LIMPIEZA CON ESCUDOS DE TIEMPO
+      // 4. LIMPIEZA, CONTEXTO DE PROYECTO Y ESCUDOS DE TIEMPO
       const tasksUnicas = Array.from(new Map(allTasks.map(task => [task.id, task])).values());
       const tareasLimpias = [];
       
       const now = new Date();
       const limiteFantasma = new Date();
-      limiteFantasma.setDate(now.getDate() - 15); // Fecha límite: 15 días atrás
+      limiteFantasma.setDate(now.getDate() - 15);
 
       tasksUnicas.forEach(tarea => {
-        // Filtro de estados expandido
+        // Filtro de estados
         const statusName = (tarea.status && tarea.status.name) ? tarea.status.name.toLowerCase() : '';
         const currentStatus = (tarea.current_status && tarea.current_status.name) ? tarea.current_status.name.toLowerCase() : '';
         const combinedStatus = `${statusName} ${currentStatus}`;
@@ -97,31 +97,27 @@ export default async function handler(req, res) {
           return; 
         }
 
-        // Motor de fechas principal
+        // Extracción de Cliente y Proyecto
+        const projectName = tarea.project?.name || 'Proyecto Gral';
+        const clientName = tarea.project?.client?.name || tarea.client?.name || '';
+        const contextoProyecto = clientName ? `[${clientName} > ${projectName}]` : `[${projectName}]`;
+
+        // Motor de fechas
         let deadlineStr = tarea.deadline || 'Sin fecha';
         if (tarea.deadline) {
           const dateDeadline = new Date(tarea.deadline);
-          
-          // Escudo 1: Si venció hace más de 15 días, la borramos (tarea fantasma)
-          if (dateDeadline < limiteFantasma) return;
-          
-          // Escudo 2: Si ya pasó la fecha de hoy, la marcamos
-          if (dateDeadline < now) {
-            deadlineStr = `[VENCIDA] ${deadlineStr}`;
-          }
+          if (dateDeadline < limiteFantasma) return; // Adiós fantasmas
+          if (dateDeadline < now) deadlineStr = `[VENCIDA] ${deadlineStr}`;
         }
 
-        const cols = (tarea.collaborators || []).map(c => `${c.first_name || ''} ${c.last_name || ''}`.trim());
-        const pm = tarea.pm ? `${tarea.pm.first_name || ''} ${tarea.pm.last_name || ''}`.trim() : '';
-        const involucrados = [...new Set([...cols, pm].filter(Boolean))].join(', ');
-
+        // Ya no enviamos "p" (participantes) a la IA para ahorrar tokens y evitar listas largas
         tareasLimpias.push({
+          c: contextoProyecto,
           t: tarea.name || tarea.title || 'Sin título',
-          d: deadlineStr,
-          p: involucrados
+          d: deadlineStr
         });
 
-        // Motor de fechas para subtareas
+        // Motor de fechas y contexto para subtareas
         if (tarea.subtasks && Array.isArray(tarea.subtasks)) {
           tarea.subtasks.forEach(sub => {
             const subStatus = (sub.status && sub.status.name) ? sub.status.name.toLowerCase() : '';
@@ -131,36 +127,34 @@ export default async function handler(req, res) {
             if (subDeadlineStr !== 'Sin fecha') {
               const sDate = new Date(subDeadlineStr);
               if (sDate < limiteFantasma) return;
-              if (sDate < now) {
-                subDeadlineStr = `[VENCIDA] ${subDeadlineStr}`;
-              }
+              if (sDate < now) subDeadlineStr = `[VENCIDA] ${subDeadlineStr}`;
             }
 
-            const subCols = (sub.collaborators || []).map(c => `${c.first_name || ''} ${c.last_name || ''}`.trim());
-            const subInvolucrados = [...new Set([...subCols].filter(Boolean))].join(', ');
-            
-            if (subInvolucrados) {
-              tareasLimpias.push({
-                t: `[Subtarea] ${sub.name || sub.title || 'Sin título'} (de: ${tarea.name || tarea.title})`,
-                d: subDeadlineStr,
-                p: subInvolucrados
-              });
-            }
+            tareasLimpias.push({
+              c: contextoProyecto,
+              t: `(Subtarea) ${sub.name || sub.title || 'Sin título'}`,
+              d: subDeadlineStr
+            });
           });
         }
       });
 
-      // 5. Análisis de OpenAI con consciencia temporal
+      // 5. Análisis de OpenAI con Prompt Ajustado
       const fechaHoy = new Date().toLocaleString('es-AR', { timeZone: 'America/Buenos_Aires' });
 
-      const promptSistema = `Eres el coordinador de tráfico de la agencia Ninch. Hoy es exactamente ${fechaHoy}.
+      const promptSistema = `Eres el coordinador de tráfico de la agencia Ninch. Hoy es ${fechaHoy}.
       
-      REGLAS CRÍTICAS DE TIEMPO:
-      1. Si una tarea dice "[VENCIDA]", significa que su fecha límite ya pasó. NO digas que "se acerca rápidamente" ni que es una urgencia a futuro. Trátala como una tarea atrasada.
-      2. Contrasta el volumen de tareas activas con la cercanía real de los deadlines a la fecha de hoy para evaluar disponibilidad.
-      3. Presenta un reporte en viñetas detallando las tareas. Cierra con un veredicto claro sobre si la persona está libre u ocupada.`;
+      REGLAS DE FORMATO CRÍTICAS:
+      1. Recibes tareas con "c" = Cliente/Proyecto, "t" = Título, "d" = Deadline.
+      2. Muestra cada tarea usando ESTRICTAMENTE este formato de una sola línea:
+         - **[Cliente > Proyecto] Título de la tarea** | Vencimiento: Fecha
+      3. PROHIBIDO: Bajo ninguna circunstancia listes o nombres a los participantes o involucrados. Queremos una lectura completamente limpia.
+      4. ESTRUCTURA GLOBAL: 
+         - Agrupa las tareas bajo el título "Tareas Activas" y "Tareas Vencidas".
+         - Al final, incluye el resumen numérico (Total de tareas, Activas y Vencidas).
+         - Cierra con tu veredicto de disponibilidad cruzando la cantidad de tareas con las fechas límite.`;
       
-      const promptUsuario = `Solicitud en Slack: "${text}". \n\nDatos reales (tareas muy viejas fueron removidas): ${JSON.stringify(tareasLimpias)}`;
+      const promptUsuario = `Solicitud en Slack: "${text}". \n\nDatos reales extraídos: ${JSON.stringify(tareasLimpias)}`;
 
       const openaiResponse = await fetch('https://api.openai.com/v1/chat/completions', {
         method: 'POST',
@@ -218,6 +212,6 @@ export default async function handler(req, res) {
 
   return res.status(200).json({ 
     response_type: "in_channel",
-    text: "⏳ Limpiando tareas fantasma y calculando fechas de entrega reales... Esto tomará unos segundos." 
+    text: "⏳ Cruzando clientes, proyectos y calculando disponibilidad... Esto tomará unos segundos." 
   });
 }
