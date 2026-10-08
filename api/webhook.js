@@ -50,15 +50,15 @@ export default async function handler(req, res) {
       if (!tokenResponse.ok) throw new Error("Fallo en autenticación de COR");
       const tokenData = await tokenResponse.json();
 
-      // 3. EXTRACCIÓN QUIRÚRGICA POR ID
       let allTasks = [];
 
       if (idsABuscar.length > 0) {
+        // A. BÚSQUEDA QUIRÚRGICA (Tareas principales asignadas directamente)
         for (const id of idsABuscar) {
           const filterObj = { collaborator: id };
           const filterStr = encodeURIComponent(JSON.stringify(filterObj));
           
-          const corUrl = `https://api.projectcor.com/v2/tasks?archived=2&filters=${filterStr}`;
+          const corUrl = `https://api.projectcor.com/v2/tasks?archived=2&per_page=100&filters=${filterStr}`;
           const corResponse = await fetch(corUrl, {
             method: 'GET',
             headers: { 'Authorization': `Bearer ${tokenData.access_token}`, 'Content-Type': 'application/json' }
@@ -70,6 +70,22 @@ export default async function handler(req, res) {
             allTasks = allTasks.concat(tasksList);
           }
         }
+
+        // B. RED DE ARRASTRE (Traemos las últimas 300 tareas activas de la agencia para escanear subtareas)
+        for (let page = 1; page <= 3; page++) {
+          const genUrl = `https://api.projectcor.com/v2/tasks?archived=2&per_page=100&page=${page}`;
+          const genResponse = await fetch(genUrl, {
+            method: 'GET',
+            headers: { 'Authorization': `Bearer ${tokenData.access_token}`, 'Content-Type': 'application/json' }
+          });
+          if (genResponse.ok) {
+            const genData = await genResponse.json();
+            const tasksList = Array.isArray(genData) ? genData : (genData.data || genData.items || []);
+            allTasks = allTasks.concat(tasksList);
+            if (tasksList.length < 100) break; 
+          }
+        }
+
       } else {
         await fetch(response_url, {
           method: 'POST',
@@ -79,7 +95,7 @@ export default async function handler(req, res) {
         return res.status(200).json({ success: true });
       }
 
-      // 4. LIMPIEZA, CONTEXTO DE PROYECTO Y ESCUDOS DE TIEMPO
+      // 3. LIMPIEZA, FILTRO Y ASIGNACIÓN EXACTA
       const tasksUnicas = Array.from(new Map(allTasks.map(task => [task.id, task])).values());
       const tareasLimpias = [];
       
@@ -88,73 +104,79 @@ export default async function handler(req, res) {
       limiteFantasma.setDate(now.getDate() - 15);
 
       tasksUnicas.forEach(tarea => {
-        // Filtro de estados
-        const statusName = (tarea.status && tarea.status.name) ? tarea.status.name.toLowerCase() : '';
-        const currentStatus = (tarea.current_status && tarea.current_status.name) ? tarea.current_status.name.toLowerCase() : '';
-        const combinedStatus = `${statusName} ${currentStatus}`;
-        
-        if (combinedStatus.includes('finalizad') || combinedStatus.includes('completad') || combinedStatus.includes('done') || combinedStatus.includes('aprobada') || combinedStatus.includes('entregada')) {
-          return; 
-        }
-
-        // Extracción de Cliente y Proyecto
         const projectName = tarea.project?.name || 'Proyecto Gral';
         const clientName = tarea.project?.client?.name || tarea.client?.name || '';
         const contextoProyecto = clientName ? `[${clientName} > ${projectName}]` : `[${projectName}]`;
 
-        // Motor de fechas
+        // Evaluar Tarea Principal
+        const statusName = (tarea.status && tarea.status.name) ? tarea.status.name.toLowerCase() : '';
+        const currentStatus = (tarea.current_status && tarea.current_status.name) ? tarea.current_status.name.toLowerCase() : '';
+        const combinedStatus = `${statusName} ${currentStatus}`;
+        const isParentFinished = combinedStatus.includes('finalizad') || combinedStatus.includes('completad') || combinedStatus.includes('done') || combinedStatus.includes('aprobada') || combinedStatus.includes('entregada');
+
         let deadlineStr = tarea.deadline || 'Sin fecha';
+        let validParentTime = true;
         if (tarea.deadline) {
           const dateDeadline = new Date(tarea.deadline);
-          if (dateDeadline < limiteFantasma) return; // Adiós fantasmas
+          if (dateDeadline < limiteFantasma) validParentTime = false;
           if (dateDeadline < now) deadlineStr = `[VENCIDA] ${deadlineStr}`;
         }
 
-        // Ya no enviamos "p" (participantes) a la IA para ahorrar tokens y evitar listas largas
-        tareasLimpias.push({
-          c: contextoProyecto,
-          t: tarea.name || tarea.title || 'Sin título',
-          d: deadlineStr
-        });
+        // Verificamos si la persona consultada está en la tarea principal
+        const inParent = tarea.collaborators?.some(c => idsABuscar.includes(c.id)) || (tarea.pm && idsABuscar.includes(tarea.pm.id));
 
-        // Motor de fechas y contexto para subtareas
+        if (inParent && !isParentFinished && validParentTime) {
+          tareasLimpias.push({
+            c: contextoProyecto,
+            t: `[Tarea] ${tarea.name || tarea.title || 'Sin título'}`,
+            d: deadlineStr
+          });
+        }
+
+        // Evaluar Subtareas (Buscamos si la persona está explícitamente en alguna)
         if (tarea.subtasks && Array.isArray(tarea.subtasks)) {
           tarea.subtasks.forEach(sub => {
             const subStatus = (sub.status && sub.status.name) ? sub.status.name.toLowerCase() : '';
-            if (subStatus.includes('finalizad') || subStatus.includes('completad') || subStatus.includes('done') || subStatus.includes('aprobada')) return;
+            if (subStatus.includes('finalizad') || subStatus.includes('completad') || subStatus.includes('done') || subStatus.includes('aprobada') || subStatus.includes('entregada')) return;
 
             let subDeadlineStr = sub.deadline || tarea.deadline || 'Sin fecha';
+            let validSubTime = true;
             if (subDeadlineStr !== 'Sin fecha') {
               const sDate = new Date(subDeadlineStr);
-              if (sDate < limiteFantasma) return;
+              if (sDate < limiteFantasma) validSubTime = false;
               if (sDate < now) subDeadlineStr = `[VENCIDA] ${subDeadlineStr}`;
             }
 
-            tareasLimpias.push({
-              c: contextoProyecto,
-              t: `(Subtarea) ${sub.name || sub.title || 'Sin título'}`,
-              d: subDeadlineStr
-            });
+            // Verificamos si la persona consultada está específicamente en esta subtarea
+            const inSub = sub.collaborators?.some(c => idsABuscar.includes(c.id));
+
+            if (inSub && validSubTime) {
+              tareasLimpias.push({
+                c: contextoProyecto,
+                t: `[Subtarea] ${sub.name || sub.title || 'Sin título'}`,
+                d: subDeadlineStr
+              });
+            }
           });
         }
       });
 
-      // 5. Análisis de OpenAI con Prompt Ajustado
+      // Evitamos tareas duplicadas en el array final si se repiten datos
+      const tareasFinales = Array.from(new Set(tareasLimpias.map(JSON.stringify))).map(JSON.parse);
+
+      // 4. Análisis de OpenAI con Prompt Ajustado
       const fechaHoy = new Date().toLocaleString('es-AR', { timeZone: 'America/Buenos_Aires' });
 
       const promptSistema = `Eres el coordinador de tráfico de la agencia Ninch. Hoy es ${fechaHoy}.
       
       REGLAS DE FORMATO CRÍTICAS:
       1. Recibes tareas con "c" = Cliente/Proyecto, "t" = Título, "d" = Deadline.
-      2. Muestra cada tarea usando ESTRICTAMENTE este formato de una sola línea:
-         - **[Cliente > Proyecto] Título de la tarea** | Vencimiento: Fecha
-      3. PROHIBIDO: Bajo ninguna circunstancia listes o nombres a los participantes o involucrados. Queremos una lectura completamente limpia.
-      4. ESTRUCTURA GLOBAL: 
-         - Agrupa las tareas bajo el título "Tareas Activas" y "Tareas Vencidas".
-         - Al final, incluye el resumen numérico (Total de tareas, Activas y Vencidas).
-         - Cierra con tu veredicto de disponibilidad cruzando la cantidad de tareas con las fechas límite.`;
+      2. Muestra cada tarea usando ESTRICTAMENTE este formato:
+         - **[Cliente > Proyecto] Título de la tarea o subtarea** | Vencimiento: Fecha
+      3. PROHIBIDO: Bajo ninguna circunstancia listes a los participantes.
+      4. ESTRUCTURA: Agrupa en "Tareas Activas" y "Tareas Vencidas". Cierra con un resumen numérico y tu veredicto de disponibilidad.`;
       
-      const promptUsuario = `Solicitud en Slack: "${text}". \n\nDatos reales extraídos: ${JSON.stringify(tareasLimpias)}`;
+      const promptUsuario = `Solicitud: "${text}". \n\nDatos de tareas y subtareas asignadas al usuario: ${JSON.stringify(tareasFinales)}`;
 
       const openaiResponse = await fetch('https://api.openai.com/v1/chat/completions', {
         method: 'POST',
@@ -173,7 +195,7 @@ export default async function handler(req, res) {
       const openaiData = await openaiResponse.json();
       const iaResponse = openaiData.choices?.[0]?.message?.content || "No se pudo generar el análisis.";
 
-      // 6. Enviar a Slack
+      // 5. Enviar a Slack
       await fetch(response_url, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -212,6 +234,6 @@ export default async function handler(req, res) {
 
   return res.status(200).json({ 
     response_type: "in_channel",
-    text: "⏳ Cruzando clientes, proyectos y calculando disponibilidad... Esto tomará unos segundos." 
+    text: "⏳ Extrayendo tareas principales y escaneando la red de subtareas... Esto tomará unos segundos." 
   });
 }
