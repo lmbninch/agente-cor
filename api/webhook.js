@@ -11,26 +11,27 @@ export default async function handler(req, res) {
 
       // 1. DIRECTORIO OFICIAL DEL EQUIPO CREATIVO
       const DIRECTORIO_CREATIVO = {
-        "nasa": 103413, "lombardo": 103413,
-        "agustina perez": 103414,
-        "carolina": 103421, "dorso": 103421,
-        "vanesa": 103434, "copes": 103434,
-        "mercedes": 103436, "palumbo": 103436,
-        "lucas": 103439, "vega": 103439,
-        "candela jordi": 103441, "jordi": 103441,
-        "joi": 103443, "sanchez": 103443,
-        "demian": 103453, "buezas": 103453,
-        "julieta": 103455, "lamarque": 103455,
-        "agustina carro": 103467, "carro": 103467,
-        "candela dallocchio": 103468, "dallocchio": 103468,
-        "ignacio": 103477, "cairola": 103477,
-        "sol": 103479, "rodriguez": 103479, "escudero": 103479,
-        "leandro": 103480, "lean": 103480, "barral": 103480,
-        "federico": 103481, "fede": 103481, "martinez": 103481,
-        "matilda": 103486, "brero": 103486,
-        "joaquin": 104457, "baez": 104457,
-        "ana": 104458, "paula": 104458, "barel": 104458,
-        "milagros": 104459, "garcia": 104459
+        "nasa": 103413, "lombardo": 103413, "agustina perez": 103414,
+        "carolina": 103421, "dorso": 103421, "vanesa": 103434, "copes": 103434,
+        "mercedes": 103436, "palumbo": 103436, "lucas": 103439, "vega": 103439,
+        "candela jordi": 103441, "jordi": 103441, "joi": 103443, "sanchez": 103443,
+        "demian": 103453, "buezas": 103453, "julieta": 103455, "lamarque": 103455,
+        "agustina carro": 103467, "carro": 103467, "candela dallocchio": 103468, "dallocchio": 103468,
+        "ignacio": 103477, "cairola": 103477, "sol": 103479, "rodriguez": 103479, "escudero": 103479,
+        "leandro": 103480, "lean": 103480, "barral": 103480, "federico": 103481, "fede": 103481, "martinez": 103481,
+        "matilda": 103486, "brero": 103486, "joaquin": 104457, "baez": 104457,
+        "ana": 104458, "paula": 104458, "barel": 104458, "milagros": 104459, "garcia": 104459
+      };
+
+      // Mapa inverso para etiquetar tareas por dueño
+      const NOMBRES_POR_ID = {
+        103413: "Nasa Lombardo", 103414: "Agustina Perez", 103421: "Carolina Dorso",
+        103434: "Vanesa Copes", 103436: "Mercedes Palumbo", 103439: "Lucas Vega",
+        103441: "Candela Jordi", 103443: "Joi Sanchez", 103453: "Demian Buezas",
+        103455: "Julieta Lamarque", 103467: "Agustina Carro", 103468: "Candela DallOcchio",
+        103477: "Ignacio Cairola", 103479: "Sol Rodriguez", 103480: "Leandro Barral",
+        103481: "Federico Martinez", 103486: "Matilda Brero", 104457: "Joaquin Baez",
+        104458: "Ana Paula Barel", 104459: "Milagros Garcia"
       };
 
       let idsABuscar = [];
@@ -53,7 +54,7 @@ export default async function handler(req, res) {
       let allTasks = [];
 
       if (idsABuscar.length > 0) {
-        // A. BÚSQUEDA QUIRÚRGICA (Tareas principales de la persona)
+        // A. BÚSQUEDA QUIRÚRGICA
         for (const id of idsABuscar) {
           const filterObj = { collaborator: id };
           const filterStr = encodeURIComponent(JSON.stringify(filterObj));
@@ -71,7 +72,7 @@ export default async function handler(req, res) {
           }
         }
 
-        // B. RED DE ARRASTRE PROFUNDA (10 páginas = 1000 tareas para atrapar las subtareas ocultas)
+        // B. RED DE ARRASTRE PROFUNDA
         for (let page = 1; page <= 10; page++) {
           const genUrl = `https://api.projectcor.com/v2/tasks?archived=2&per_page=100&page=${page}`;
           const genResponse = await fetch(genUrl, {
@@ -85,7 +86,6 @@ export default async function handler(req, res) {
             if (tasksList.length < 100) break; 
           }
         }
-
       } else {
         await fetch(response_url, {
           method: 'POST',
@@ -95,7 +95,7 @@ export default async function handler(req, res) {
         return res.status(200).json({ success: true });
       }
 
-      // 3. LIMPIEZA Y DETECCIÓN ROBUSTA
+      // 3. LIMPIEZA Y CLASIFICACIÓN POR USUARIO
       const tasksUnicas = Array.from(new Map(allTasks.map(task => [task.id, task])).values());
       const tareasLimpias = [];
       
@@ -106,12 +106,11 @@ export default async function handler(req, res) {
       tasksUnicas.forEach(tarea => {
         const projectName = tarea.project?.name || 'Proyecto Gral';
         const clientName = tarea.project?.client?.name || tarea.client?.name || '';
-        const contextoProyecto = clientName ? `[${clientName} > ${projectName}]` : `[${projectName}]`;
+        const contextoProyecto = clientName ? `[${clientName} >${projectName}]` : `[${projectName}]`;
 
-        // Evaluar Tarea Principal
         const statusName = (tarea.status && tarea.status.name) ? tarea.status.name.toLowerCase() : '';
         const currentStatus = (tarea.current_status && tarea.current_status.name) ? tarea.current_status.name.toLowerCase() : '';
-        const combinedStatus = `${statusName} ${currentStatus}`;
+        const combinedStatus = `${statusName}${currentStatus}`;
         
         const isParentFinished = combinedStatus.includes('finalizad') || combinedStatus.includes('completad') || combinedStatus.includes('done') || combinedStatus.includes('aprobada') || combinedStatus.includes('entregada');
 
@@ -123,21 +122,29 @@ export default async function handler(req, res) {
           if (dateDeadline < now) deadlineStr = `[VENCIDA] ${deadlineStr}`;
         }
 
-        // CORRECCIÓN: Búsqueda robusta de colaboradores (si es objeto o número)
-        const inParent = (tarea.collaborators || []).some(c => {
-          const colabId = c.id || c; 
-          return idsABuscar.includes(colabId);
-        }) || (tarea.pm && idsABuscar.includes(tarea.pm.id || tarea.pm));
+        // ¿A quién de los buscados pertenece la tarea principal?
+        let asignadosParent = [];
+        (tarea.collaborators || []).forEach(c => {
+          const colabId = c.id || c;
+          if (idsABuscar.includes(colabId)) asignadosParent.push(NOMBRES_POR_ID[colabId] || "Colaborador");
+        });
+        if (tarea.pm) {
+          const pmId = tarea.pm.id || tarea.pm;
+          if (idsABuscar.includes(pmId) && !asignadosParent.includes(NOMBRES_POR_ID[pmId])) {
+            asignadosParent.push(NOMBRES_POR_ID[pmId] || "PM");
+          }
+        }
 
-        if (inParent && !isParentFinished && validParentTime) {
+        if (asignadosParent.length > 0 && !isParentFinished && validParentTime) {
           tareasLimpias.push({
+            u: asignadosParent.join(" y "), // Etiqueta oculta para que IA sepa de quién es
             c: contextoProyecto,
             t: `[Tarea] ${tarea.name || tarea.title || 'Sin título'}`,
             d: deadlineStr
           });
         }
 
-        // Evaluar Subtareas 
+        // Evaluación de Subtareas
         if (tarea.subtasks && Array.isArray(tarea.subtasks)) {
           tarea.subtasks.forEach(sub => {
             const subStatus = (sub.status && sub.status.name) ? sub.status.name.toLowerCase() : '';
@@ -151,14 +158,16 @@ export default async function handler(req, res) {
               if (sDate < now) subDeadlineStr = `[VENCIDA] ${subDeadlineStr}`;
             }
 
-            // CORRECCIÓN: Búsqueda robusta de colaboradores en subtareas
-            const inSub = (sub.collaborators || []).some(c => {
+            // ¿A quién de los buscados pertenece esta subtarea?
+            let asignadosSub = [];
+            (sub.collaborators || []).forEach(c => {
               const colabId = c.id || c;
-              return idsABuscar.includes(colabId);
+              if (idsABuscar.includes(colabId)) asignadosSub.push(NOMBRES_POR_ID[colabId] || "Colaborador");
             });
 
-            if (inSub && validSubTime) {
+            if (asignadosSub.length > 0 && validSubTime) {
               tareasLimpias.push({
+                u: asignadosSub.join(" y "),
                 c: contextoProyecto,
                 t: `[Subtarea] ${sub.name || sub.title || 'Sin título'}`,
                 d: subDeadlineStr
@@ -170,79 +179,7 @@ export default async function handler(req, res) {
 
       const tareasFinales = Array.from(new Set(tareasLimpias.map(JSON.stringify))).map(JSON.parse);
 
-      // 4. Análisis de OpenAI BLINDADO Y ANALÍTICO
+      // 4. Análisis de OpenAI (Con reglas inquebrantables)
       const fechaHoy = new Date().toLocaleString('es-AR', { timeZone: 'America/Buenos_Aires' });
 
-      const promptSistema = `Eres el coordinador de tráfico de la agencia Ninch. Hoy es ${fechaHoy}.
-      
-      ESTRUCTURA DE CLASIFICACIÓN ESTRICTA (¡NO TE EQUIVOQUES!):
-      1. TAREAS ACTIVAS: Aquí debes listar ÚNICAMENTE las tareas cuya fecha "d" NO contiene la palabra "[VENCIDA]".
-      2. TAREAS VENCIDAS: Aquí debes listar EXCLUSIVAMENTE las tareas cuya fecha "d" CONTIENE EXPLÍCITAMENTE la palabra "[VENCIDA]". Es inaceptable mezclar tareas vencidas en la lista de activas.
-      
-      REGLAS DE FORMATO:
-      - Usa este formato exacto: **[Cliente > Proyecto] Título** | Vencimiento: Fecha
-      - PROHIBIDO listar a los participantes.
-      - Cierra con un recuento numérico (Activas vs Vencidas).
-      - Cierra con un "### Veredicto de Disponibilidad" escribiendo un párrafo completo, detallado y analítico justificando tu recomendación como un verdadero profesional.`;
-      
-      const promptUsuario = `Solicitud: "${text}". \n\nDatos de tareas y subtareas asignadas al usuario: ${JSON.stringify(tareasFinales)}`;
-
-      const openaiResponse = await fetch('https://api.openai.com/v1/chat/completions', {
-        method: 'POST',
-        headers: { 'Authorization': `Bearer ${process.env.OPENAI_API_KEY}`, 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          model: "gpt-4o-mini",
-          messages: [
-            { role: "system", content: promptSistema },
-            { role: "user", content: promptUsuario }
-          ],
-          temperature: 0.7 // Temperatura equilibrada para análisis rico sin perder estructura
-        })
-      });
-      
-      if (!openaiResponse.ok) throw new Error("Error en la generación de OpenAI");
-      const openaiData = await openaiResponse.json();
-      const iaResponse = openaiData.choices?.[0]?.message?.content || "No se pudo generar el análisis.";
-
-      // 5. Enviar a Slack
-      await fetch(response_url, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ response_type: "in_channel", text: iaResponse })
-      });
-
-      return res.status(200).json({ success: true });
-    } catch (error) {
-      console.error("Error en background:", error);
-      await fetch(req.body.response_url, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ response_type: "in_channel", text: `❌ Error procesando los datos: ${error.message}` })
-      });
-      return res.status(500).json({ error: error.message });
-    }
-  }
-
-  // =========================================================================
-  // PARTE 2: MODO SLACK (Respuesta instantánea)
-  // =========================================================================
-  const userMessage = req.body.text;
-  const responseUrl = req.body.response_url;
-
-  const protocol = req.headers['x-forwarded-proto'] || 'https';
-  const host = req.headers['host'];
-  const selfUrl = `${protocol}://${host}/api/webhook`;
-
-  fetch(selfUrl, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ is_background: true, text: userMessage, response_url: responseUrl })
-  }).catch(console.error);
-
-  await new Promise(resolve => setTimeout(resolve, 50));
-
-  return res.status(200).json({ 
-    response_type: "in_channel",
-    text: "⏳ Escaneando tareas y generando reporte analítico... Esto tomará unos segundos." 
-  });
-}
+      const promptSistema = `Eres el coordinador de tráfico de la agencia
