@@ -23,7 +23,6 @@ export default async function handler(req, res) {
         "ana": 104458, "paula": 104458, "barel": 104458, "milagros": 104459, "garcia": 104459
       };
 
-      // Mapa inverso para etiquetar tareas por dueño
       const NOMBRES_POR_ID = {
         103413: "Nasa Lombardo", 103414: "Agustina Perez", 103421: "Carolina Dorso",
         103434: "Vanesa Copes", 103436: "Mercedes Palumbo", 103439: "Lucas Vega",
@@ -54,38 +53,41 @@ export default async function handler(req, res) {
       let allTasks = [];
 
       if (idsABuscar.length > 0) {
-        // A. BÚSQUEDA QUIRÚRGICA
-        for (const id of idsABuscar) {
+        // A. BÚSQUEDA QUIRÚRGICA EN PARALELO (Turbo)
+        const surgicalPromises = idsABuscar.map(id => {
           const filterObj = { collaborator: id };
           const filterStr = encodeURIComponent(JSON.stringify(filterObj));
-          
           const corUrl = `https://api.projectcor.com/v2/tasks?archived=2&per_page=100&filters=${filterStr}`;
-          const corResponse = await fetch(corUrl, {
+          return fetch(corUrl, {
             method: 'GET',
             headers: { 'Authorization': `Bearer ${tokenData.access_token}`, 'Content-Type': 'application/json' }
-          });
-          
-          if (corResponse.ok) {
-            const corData = await corResponse.json();
-            const tasksList = Array.isArray(corData) ? corData : (corData.data || corData.items || []);
-            allTasks = allTasks.concat(tasksList);
-          }
-        }
+          }).then(res => res.ok ? res.json() : { data: [] }).catch(() => ({ data: [] }));
+        });
 
-        // B. RED DE ARRASTRE PROFUNDA
+        const surgicalResults = await Promise.all(surgicalPromises);
+        surgicalResults.forEach(corData => {
+          const tasksList = Array.isArray(corData) ? corData : (corData.data || corData.items || []);
+          allTasks = allTasks.concat(tasksList);
+        });
+
+        // B. RED DE ARRASTRE PROFUNDA EN PARALELO (Las 10 páginas al mismo tiempo)
+        const fetchPromises = [];
         for (let page = 1; page <= 10; page++) {
           const genUrl = `https://api.projectcor.com/v2/tasks?archived=2&per_page=100&page=${page}`;
-          const genResponse = await fetch(genUrl, {
-            method: 'GET',
-            headers: { 'Authorization': `Bearer ${tokenData.access_token}`, 'Content-Type': 'application/json' }
-          });
-          if (genResponse.ok) {
-            const genData = await genResponse.json();
-            const tasksList = Array.isArray(genData) ? genData : (genData.data || genData.items || []);
-            allTasks = allTasks.concat(tasksList);
-            if (tasksList.length < 100) break; 
-          }
+          fetchPromises.push(
+            fetch(genUrl, {
+              method: 'GET',
+              headers: { 'Authorization': `Bearer ${tokenData.access_token}`, 'Content-Type': 'application/json' }
+            }).then(res => res.ok ? res.json() : { data: [] }).catch(() => ({ data: [] }))
+          );
         }
+        
+        const pagesResults = await Promise.all(fetchPromises);
+        pagesResults.forEach(genData => {
+          const tasksList = Array.isArray(genData) ? genData : (genData.data || genData.items || []);
+          allTasks = allTasks.concat(tasksList);
+        });
+
       } else {
         await fetch(response_url, {
           method: 'POST',
@@ -95,7 +97,7 @@ export default async function handler(req, res) {
         return res.status(200).json({ success: true });
       }
 
-      // 3. LIMPIEZA Y CLASIFICACIÓN POR USUARIO
+      // 3. LIMPIEZA Y CLASIFICACIÓN
       const tasksUnicas = Array.from(new Map(allTasks.map(task => [task.id, task])).values());
       const tareasLimpias = [];
       
@@ -106,11 +108,11 @@ export default async function handler(req, res) {
       tasksUnicas.forEach(tarea => {
         const projectName = tarea.project?.name || 'Proyecto Gral';
         const clientName = tarea.project?.client?.name || tarea.client?.name || '';
-        const contextoProyecto = clientName ? `[${clientName} >${projectName}]` : `[${projectName}]`;
+        const contextoProyecto = clientName ? `[${clientName} > ${projectName}]` : `[${projectName}]`;
 
         const statusName = (tarea.status && tarea.status.name) ? tarea.status.name.toLowerCase() : '';
         const currentStatus = (tarea.current_status && tarea.current_status.name) ? tarea.current_status.name.toLowerCase() : '';
-        const combinedStatus = `${statusName}${currentStatus}`;
+        const combinedStatus = `${statusName} ${currentStatus}`;
         
         const isParentFinished = combinedStatus.includes('finalizad') || combinedStatus.includes('completad') || combinedStatus.includes('done') || combinedStatus.includes('aprobada') || combinedStatus.includes('entregada');
 
@@ -122,7 +124,6 @@ export default async function handler(req, res) {
           if (dateDeadline < now) deadlineStr = `[VENCIDA] ${deadlineStr}`;
         }
 
-        // ¿A quién de los buscados pertenece la tarea principal?
         let asignadosParent = [];
         (tarea.collaborators || []).forEach(c => {
           const colabId = c.id || c;
@@ -137,14 +138,13 @@ export default async function handler(req, res) {
 
         if (asignadosParent.length > 0 && !isParentFinished && validParentTime) {
           tareasLimpias.push({
-            u: asignadosParent.join(" y "), // Etiqueta oculta para que IA sepa de quién es
+            u: asignadosParent.join(" y "), 
             c: contextoProyecto,
             t: `[Tarea] ${tarea.name || tarea.title || 'Sin título'}`,
             d: deadlineStr
           });
         }
 
-        // Evaluación de Subtareas
         if (tarea.subtasks && Array.isArray(tarea.subtasks)) {
           tarea.subtasks.forEach(sub => {
             const subStatus = (sub.status && sub.status.name) ? sub.status.name.toLowerCase() : '';
@@ -158,7 +158,6 @@ export default async function handler(req, res) {
               if (sDate < now) subDeadlineStr = `[VENCIDA] ${subDeadlineStr}`;
             }
 
-            // ¿A quién de los buscados pertenece esta subtarea?
             let asignadosSub = [];
             (sub.collaborators || []).forEach(c => {
               const colabId = c.id || c;
@@ -167,19 +166,4 @@ export default async function handler(req, res) {
 
             if (asignadosSub.length > 0 && validSubTime) {
               tareasLimpias.push({
-                u: asignadosSub.join(" y "),
-                c: contextoProyecto,
-                t: `[Subtarea] ${sub.name || sub.title || 'Sin título'}`,
-                d: subDeadlineStr
-              });
-            }
-          });
-        }
-      });
-
-      const tareasFinales = Array.from(new Set(tareasLimpias.map(JSON.stringify))).map(JSON.parse);
-
-      // 4. Análisis de OpenAI (Con reglas inquebrantables)
-      const fechaHoy = new Date().toLocaleString('es-AR', { timeZone: 'America/Buenos_Aires' });
-
-      const promptSistema = `Eres el coordinador de tráfico de la agencia
+                u: asignadosSub
