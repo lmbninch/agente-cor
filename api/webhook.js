@@ -53,7 +53,7 @@ export default async function handler(req, res) {
       let allTasks = [];
 
       if (idsABuscar.length > 0) {
-        // A. BÚSQUEDA QUIRÚRGICA (Tareas principales asignadas directamente)
+        // A. BÚSQUEDA QUIRÚRGICA (Tareas principales de la persona)
         for (const id of idsABuscar) {
           const filterObj = { collaborator: id };
           const filterStr = encodeURIComponent(JSON.stringify(filterObj));
@@ -71,8 +71,8 @@ export default async function handler(req, res) {
           }
         }
 
-        // B. RED DE ARRASTRE (Traemos las últimas 300 tareas activas de la agencia para escanear subtareas)
-        for (let page = 1; page <= 3; page++) {
+        // B. RED DE ARRASTRE PROFUNDA (Ampliamos a 10 páginas = 1000 tareas para atrapar las subtareas ocultas)
+        for (let page = 1; page <= 10; page++) {
           const genUrl = `https://api.projectcor.com/v2/tasks?archived=2&per_page=100&page=${page}`;
           const genResponse = await fetch(genUrl, {
             method: 'GET',
@@ -95,7 +95,7 @@ export default async function handler(req, res) {
         return res.status(200).json({ success: true });
       }
 
-      // 3. LIMPIEZA, FILTRO Y ASIGNACIÓN EXACTA
+      // 3. LIMPIEZA Y DETECCIÓN ROBUSTA
       const tasksUnicas = Array.from(new Map(allTasks.map(task => [task.id, task])).values());
       const tareasLimpias = [];
       
@@ -112,6 +112,8 @@ export default async function handler(req, res) {
         const statusName = (tarea.status && tarea.status.name) ? tarea.status.name.toLowerCase() : '';
         const currentStatus = (tarea.current_status && tarea.current_status.name) ? tarea.current_status.name.toLowerCase() : '';
         const combinedStatus = `${statusName} ${currentStatus}`;
+        
+        // Dejamos pasar todo (Nueva, En Proceso, etc) MENOS las terminadas
         const isParentFinished = combinedStatus.includes('finalizad') || combinedStatus.includes('completad') || combinedStatus.includes('done') || combinedStatus.includes('aprobada') || combinedStatus.includes('entregada');
 
         let deadlineStr = tarea.deadline || 'Sin fecha';
@@ -122,8 +124,7 @@ export default async function handler(req, res) {
           if (dateDeadline < now) deadlineStr = `[VENCIDA] ${deadlineStr}`;
         }
 
-        // Verificamos si la persona consultada está en la tarea principal
-        const inParent = tarea.collaborators?.some(c => idsABuscar.includes(c.id)) || (tarea.pm && idsABuscar.includes(tarea.pm.id));
+        const inParent = tarea.collaborators?.some(c => idsABuscar.includes(typeof c === 'object' ? c.id : c)) || (tarea.pm && idsABuscar.includes(typeof tarea.pm === 'object' ? tarea.pm.id : tarea.pm));
 
         if (inParent && !isParentFinished && validParentTime) {
           tareasLimpias.push({
@@ -133,7 +134,7 @@ export default async function handler(req, res) {
           });
         }
 
-        // Evaluar Subtareas (Buscamos si la persona está explícitamente en alguna)
+        // Evaluar Subtareas (Detector robusto para distintos formatos de JSON de COR)
         if (tarea.subtasks && Array.isArray(tarea.subtasks)) {
           tarea.subtasks.forEach(sub => {
             const subStatus = (sub.status && sub.status.name) ? sub.status.name.toLowerCase() : '';
@@ -147,8 +148,8 @@ export default async function handler(req, res) {
               if (sDate < now) subDeadlineStr = `[VENCIDA] ${subDeadlineStr}`;
             }
 
-            // Verificamos si la persona consultada está específicamente en esta subtarea
-            const inSub = sub.collaborators?.some(c => idsABuscar.includes(c.id));
+            // Comprueba si Candela está en la subtarea (sea un objeto {id: x} o un número suelto x)
+            const inSub = sub.collaborators?.some(c => idsABuscar.includes(typeof c === 'object' ? c.id : c));
 
             if (inSub && validSubTime) {
               tareasLimpias.push({
@@ -161,20 +162,21 @@ export default async function handler(req, res) {
         }
       });
 
-      // Evitamos tareas duplicadas en el array final si se repiten datos
       const tareasFinales = Array.from(new Set(tareasLimpias.map(JSON.stringify))).map(JSON.parse);
 
-      // 4. Análisis de OpenAI con Prompt Ajustado
+      // 4. Análisis de OpenAI BLINDADO
       const fechaHoy = new Date().toLocaleString('es-AR', { timeZone: 'America/Buenos_Aires' });
 
       const promptSistema = `Eres el coordinador de tráfico de la agencia Ninch. Hoy es ${fechaHoy}.
       
-      REGLAS DE FORMATO CRÍTICAS:
-      1. Recibes tareas con "c" = Cliente/Proyecto, "t" = Título, "d" = Deadline.
-      2. Muestra cada tarea usando ESTRICTAMENTE este formato:
-         - **[Cliente > Proyecto] Título de la tarea o subtarea** | Vencimiento: Fecha
-      3. PROHIBIDO: Bajo ninguna circunstancia listes a los participantes.
-      4. ESTRUCTURA: Agrupa en "Tareas Activas" y "Tareas Vencidas". Cierra con un resumen numérico y tu veredicto de disponibilidad.`;
+      ESTRUCTURA DE CLASIFICACIÓN ESTRICTA (¡NO TE EQUIVOQUES!):
+      1. TAREAS ACTIVAS: Aquí debes listar ÚNICAMENTE las tareas cuya fecha "d" NO contiene la palabra "[VENCIDA]".
+      2. TAREAS VENCIDAS: Aquí debes listar EXCLUSIVAMENTE las tareas cuya fecha "d" CONTIENE EXPLÍCITAMENTE la palabra "[VENCIDA]". Es inaceptable mezclar tareas vencidas en la lista de activas.
+      
+      REGLAS DE FORMATO:
+      - Usa este formato exacto: **[Cliente > Proyecto] Título** | Vencimiento: Fecha
+      - PROHIBIDO listar a los participantes.
+      - Cierra con un recuento numérico (Activas vs Vencidas) y un veredicto de disponibilidad.`;
       
       const promptUsuario = `Solicitud: "${text}". \n\nDatos de tareas y subtareas asignadas al usuario: ${JSON.stringify(tareasFinales)}`;
 
@@ -187,7 +189,7 @@ export default async function handler(req, res) {
             { role: "system", content: promptSistema },
             { role: "user", content: promptUsuario }
           ],
-          temperature: 0.7
+          temperature: 0.2 // Bajamos la temperatura para que sea más robótico y obedezca la clasificación estrictamente
         })
       });
       
@@ -234,6 +236,6 @@ export default async function handler(req, res) {
 
   return res.status(200).json({ 
     response_type: "in_channel",
-    text: "⏳ Extrayendo tareas principales y escaneando la red de subtareas... Esto tomará unos segundos." 
+    text: "⏳ Escaneando tareas profundas y aplicando clasificación estricta... Esto tomará unos segundos." 
   });
 }
