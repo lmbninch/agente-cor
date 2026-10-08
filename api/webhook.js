@@ -71,7 +71,7 @@ export default async function handler(req, res) {
           }
         }
 
-        // B. RED DE ARRASTRE PROFUNDA (Ampliamos a 10 páginas = 1000 tareas para atrapar las subtareas ocultas)
+        // B. RED DE ARRASTRE PROFUNDA (10 páginas = 1000 tareas para atrapar las subtareas ocultas)
         for (let page = 1; page <= 10; page++) {
           const genUrl = `https://api.projectcor.com/v2/tasks?archived=2&per_page=100&page=${page}`;
           const genResponse = await fetch(genUrl, {
@@ -113,7 +113,6 @@ export default async function handler(req, res) {
         const currentStatus = (tarea.current_status && tarea.current_status.name) ? tarea.current_status.name.toLowerCase() : '';
         const combinedStatus = `${statusName} ${currentStatus}`;
         
-        // Dejamos pasar todo (Nueva, En Proceso, etc) MENOS las terminadas
         const isParentFinished = combinedStatus.includes('finalizad') || combinedStatus.includes('completad') || combinedStatus.includes('done') || combinedStatus.includes('aprobada') || combinedStatus.includes('entregada');
 
         let deadlineStr = tarea.deadline || 'Sin fecha';
@@ -124,7 +123,11 @@ export default async function handler(req, res) {
           if (dateDeadline < now) deadlineStr = `[VENCIDA] ${deadlineStr}`;
         }
 
-        const inParent = tarea.collaborators?.some(c => idsABuscar.includes(typeof c === 'object' ? c.id : c)) || (tarea.pm && idsABuscar.includes(typeof tarea.pm === 'object' ? tarea.pm.id : tarea.pm));
+        // CORRECCIÓN: Búsqueda robusta de colaboradores (si es objeto o número)
+        const inParent = (tarea.collaborators || []).some(c => {
+          const colabId = c.id || c; 
+          return idsABuscar.includes(colabId);
+        }) || (tarea.pm && idsABuscar.includes(tarea.pm.id || tarea.pm));
 
         if (inParent && !isParentFinished && validParentTime) {
           tareasLimpias.push({
@@ -134,7 +137,7 @@ export default async function handler(req, res) {
           });
         }
 
-        // Evaluar Subtareas (Detector robusto para distintos formatos de JSON de COR)
+        // Evaluar Subtareas 
         if (tarea.subtasks && Array.isArray(tarea.subtasks)) {
           tarea.subtasks.forEach(sub => {
             const subStatus = (sub.status && sub.status.name) ? sub.status.name.toLowerCase() : '';
@@ -148,8 +151,11 @@ export default async function handler(req, res) {
               if (sDate < now) subDeadlineStr = `[VENCIDA] ${subDeadlineStr}`;
             }
 
-            // Comprueba si Candela está en la subtarea (sea un objeto {id: x} o un número suelto x)
-            const inSub = sub.collaborators?.some(c => idsABuscar.includes(typeof c === 'object' ? c.id : c));
+            // CORRECCIÓN: Búsqueda robusta de colaboradores en subtareas
+            const inSub = (sub.collaborators || []).some(c => {
+              const colabId = c.id || c;
+              return idsABuscar.includes(colabId);
+            });
 
             if (inSub && validSubTime) {
               tareasLimpias.push({
@@ -164,7 +170,7 @@ export default async function handler(req, res) {
 
       const tareasFinales = Array.from(new Set(tareasLimpias.map(JSON.stringify))).map(JSON.parse);
 
-      // 4. Análisis de OpenAI BLINDADO
+      // 4. Análisis de OpenAI BLINDADO Y ANALÍTICO
       const fechaHoy = new Date().toLocaleString('es-AR', { timeZone: 'America/Buenos_Aires' });
 
       const promptSistema = `Eres el coordinador de tráfico de la agencia Ninch. Hoy es ${fechaHoy}.
@@ -176,7 +182,8 @@ export default async function handler(req, res) {
       REGLAS DE FORMATO:
       - Usa este formato exacto: **[Cliente > Proyecto] Título** | Vencimiento: Fecha
       - PROHIBIDO listar a los participantes.
-      - Cierra con un recuento numérico (Activas vs Vencidas) y un veredicto de disponibilidad.`;
+      - Cierra con un recuento numérico (Activas vs Vencidas).
+      - Cierra con un "### Veredicto de Disponibilidad" escribiendo un párrafo completo, detallado y analítico justificando tu recomendación como un verdadero profesional.`;
       
       const promptUsuario = `Solicitud: "${text}". \n\nDatos de tareas y subtareas asignadas al usuario: ${JSON.stringify(tareasFinales)}`;
 
@@ -189,7 +196,7 @@ export default async function handler(req, res) {
             { role: "system", content: promptSistema },
             { role: "user", content: promptUsuario }
           ],
-          temperature: 0.2 // Bajamos la temperatura para que sea más robótico y obedezca la clasificación estrictamente
+          temperature: 0.7 // Temperatura equilibrada para análisis rico sin perder estructura
         })
       });
       
@@ -236,6 +243,6 @@ export default async function handler(req, res) {
 
   return res.status(200).json({ 
     response_type: "in_channel",
-    text: "⏳ Escaneando tareas profundas y aplicando clasificación estricta... Esto tomará unos segundos." 
+    text: "⏳ Escaneando tareas y generando reporte analítico... Esto tomará unos segundos." 
   });
 }
