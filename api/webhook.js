@@ -56,18 +56,30 @@ export default async function handler(req, res) {
         const fetchPromises = [];
         const reqOpts = { method: 'GET', headers: { 'Authorization': `Bearer ${tokenData.access_token}`, 'Content-Type': 'application/json' } };
 
-        // A. ATAQUE QUIRÚRGICO MÚLTIPLE (v2 y v1 combinados)
+        // A. EXTRACCIÓN DIRECTA DE URL (Por si pegás un link en Slack)
+        const urlMatch = text.match(/tasks\/(\d+)/);
+        if (urlMatch && urlMatch[1]) {
+          const taskId = urlMatch[1];
+          fetchPromises.push(
+            fetch(`https://api.projectcor.com/v1/tasks/${taskId}`, reqOpts)
+              .then(r => r.ok ? r.json() : null)
+              .then(data => data ? { data: [data] } : { data: [] })
+              .catch(() => ({ data: [] }))
+          );
+        }
+
+        // B. ATAQUE QUIRÚRGICO (Buscamos al usuario en v2 y v1 simultáneamente)
         idsABuscar.forEach(id => {
           const filterStr = encodeURIComponent(JSON.stringify({ collaborator: id }));
           fetchPromises.push(fetch(`https://api.projectcor.com/v2/tasks?archived=2&per_page=100&filters=${filterStr}`, reqOpts).then(r => r.ok ? r.json() : { data: [] }).catch(() => ({ data: [] })));
-          // Respaldo v1
           fetchPromises.push(fetch(`https://api.projectcor.com/v1/tasks?collaborator_id=${id}&per_page=100`, reqOpts).then(r => r.ok ? r.json() : { data: [] }).catch(() => ({ data: [] })));
+          fetchPromises.push(fetch(`https://api.projectcor.com/v1/tasks?collaborators=${id}&per_page=100`, reqOpts).then(r => r.ok ? r.json() : { data: [] }).catch(() => ({ data: [] })));
         });
 
-        // B. RED DE ARRASTRE ORDENADA POR ACTUALIZACIÓN RECIENTE
-        for (let page = 1; page <= 6; page++) {
+        // C. RED DE ARRASTRE MASIVA (10 páginas en v2 + 10 páginas en v1 para pescar subtareas planas)
+        for (let page = 1; page <= 10; page++) {
           fetchPromises.push(fetch(`https://api.projectcor.com/v2/tasks?archived=2&per_page=100&page=${page}`, reqOpts).then(r => r.ok ? r.json() : { data: [] }).catch(() => ({ data: [] })));
-          fetchPromises.push(fetch(`https://api.projectcor.com/v2/tasks?archived=2&per_page=100&page=${page}&sort=updated_at&direction=desc`, reqOpts).then(r => r.ok ? r.json() : { data: [] }).catch(() => ({ data: [] })));
+          fetchPromises.push(fetch(`https://api.projectcor.com/v1/tasks?archived=false&per_page=100&page=${page}`, reqOpts).then(r => r.ok ? r.json() : { data: [] }).catch(() => ({ data: [] })));
         }
 
         const pagesResults = await Promise.all(fetchPromises);
@@ -85,7 +97,7 @@ export default async function handler(req, res) {
         return res.status(200).json({ success: true });
       }
 
-      // 3. LIMPIEZA, DETECCIÓN TEXTUAL Y CLASIFICACIÓN
+      // 3. LIMPIEZA Y CLASIFICACIÓN
       const tasksUnicas = Array.from(new Map(allTasks.map(task => [task.id, task])).values());
       const tareasLimpias = [];
       
@@ -98,7 +110,7 @@ export default async function handler(req, res) {
         const clientName = tarea.project?.client?.name || tarea.client?.name || '';
         const contextoProyecto = clientName ? `[${clientName} > ${projectName}]` : `[${projectName}]`;
 
-        // Lector adaptativo de estados (String u Objeto)
+        // Traducción de estados
         let statusName = '';
         if (typeof tarea.status === 'string') statusName = tarea.status.toLowerCase();
         else if (tarea.status && tarea.status.name) statusName = tarea.status.name.toLowerCase();
@@ -118,6 +130,7 @@ export default async function handler(req, res) {
           if (dateDeadline < now) deadlineStr = `[VENCIDA] ${deadlineStr}`;
         }
 
+        // ¿A quién pertenece?
         let asignadosParent = [];
         (tarea.collaborators || []).forEach(c => {
           const colabId = c.id || c;
@@ -131,7 +144,7 @@ export default async function handler(req, res) {
         }
 
         if (asignadosParent.length > 0 && !isParentFinished && validParentTime) {
-          // Detecta si la tarea general obtenida es en realidad una subtarea devuelta por la v1
+          // Detecta si vino plana de la v1 y es subtarea
           const isActuallySubtask = tarea.task_father || tarea.parent_id;
           const taskTypeLabel = isActuallySubtask ? '[Subtarea]' : '[Tarea]';
           tareasLimpias.push({
@@ -142,7 +155,7 @@ export default async function handler(req, res) {
           });
         }
 
-        // Subtareas anidadas
+        // Subtareas anidadas (por si viajan dentro de la v2)
         if (tarea.subtasks && Array.isArray(tarea.subtasks)) {
           tarea.subtasks.forEach(sub => {
             let subStatusName = '';
@@ -179,7 +192,7 @@ export default async function handler(req, res) {
 
       const tareasFinales = Array.from(new Set(tareasLimpias.map(JSON.stringify))).map(JSON.parse);
 
-      // 4. Análisis de OpenAI CON REGLAS BLINDADAS
+      // 4. Análisis de OpenAI 
       const fechaHoy = new Date().toLocaleString('es-AR', { timeZone: 'America/Buenos_Aires' });
 
       const promptSistema = `Eres el coordinador de tráfico de la agencia Ninch. Hoy es ${fechaHoy}.
@@ -258,6 +271,6 @@ export default async function handler(req, res) {
 
   return res.status(200).json({ 
     response_type: "in_channel",
-    text: "⏳ Buscando tareas asignadas... Esto tomará unos segundos." 
+    text: "⏳ Buscando subtareas planas y consultando red profunda... Esto tomará unos segundos." 
   });
 }
