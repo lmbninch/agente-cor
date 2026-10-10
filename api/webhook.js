@@ -37,44 +37,7 @@ export default async function handler(req, res) {
         }
       }
 
-      // 2. AUTH COR
-      const credencialesBase64 = Buffer.from(`${process.env.COR_API_KEY}:${process.env.COR_CLIENT_SECRET}`).toString('base64');
-      const tokenResponse = await fetch('https://api.projectcor.com/v1/oauth/token?grant_type=client_credentials', {
-        method: 'POST',
-        headers: { 'Authorization': `Basic ${credencialesBase64}`, 'Content-Type': 'application/json' }
-      });
-      if (!tokenResponse.ok) throw new Error("Fallo en autenticación de COR");
-      const tokenData = await tokenResponse.json();
-
-      let allTasks = [];
-
-      // 3. EXTRACCIÓN POR FUERZA BRUTA (INCLUYENDO PMs)
-      if (idsABuscar.length > 0) {
-        const fetchPromises = [];
-        const reqOpts = { method: 'GET', headers: { 'Authorization': `Bearer ${tokenData.access_token}`, 'Content-Type': 'application/json' } };
-
-        idsABuscar.forEach(id => {
-          const filterStr = encodeURIComponent(JSON.stringify({ collaborator: id }));
-          
-          for (let page = 1; page <= 5; page++) {
-            // API v2
-            fetchPromises.push(fetch(`https://api.projectcor.com/v2/tasks?per_page=100&page=${page}&sort=updated_at&direction=desc&filters=${filterStr}`, reqOpts).then(r => r.ok ? r.json() : { data: [] }).catch(() => ({ data: [] })));
-            
-            // API v1 (Colaboradores y PMs)
-            fetchPromises.push(fetch(`https://api.projectcor.com/v1/tasks?collaborator_id=${id}&per_page=100&page=${page}`, reqOpts).then(r => r.ok ? r.json() : { data: [] }).catch(() => ({ data: [] })));
-            fetchPromises.push(fetch(`https://api.projectcor.com/v1/tasks?collaborators=${id}&per_page=100&page=${page}`, reqOpts).then(r => r.ok ? r.json() : { data: [] }).catch(() => ({ data: [] })));
-            // NUEVO: Buscar explícitamente donde el usuario sea PM
-            fetchPromises.push(fetch(`https://api.projectcor.com/v1/tasks?pm_id=${id}&per_page=100&page=${page}`, reqOpts).then(r => r.ok ? r.json() : { data: [] }).catch(() => ({ data: [] })));
-          }
-        });
-
-        const pagesResults = await Promise.all(fetchPromises);
-        pagesResults.forEach(data => {
-          const tasksList = Array.isArray(data) ? data : (data.data || data.items || []);
-          allTasks = allTasks.concat(tasksList);
-        });
-
-      } else {
+      if (idsABuscar.length === 0) {
         await fetch(response_url, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -83,18 +46,52 @@ export default async function handler(req, res) {
         return res.status(200).json({ success: true });
       }
 
-      // 4. LIMPIEZA ARTESANAL CON PM Y FOLLOWERS
-      const tasksUnicas = Array.from(new Map(allTasks.map(task => [task.id, task])).values());
-      const tareasLimpias = [];
-      
-      const now = new Date();
+      // 2. AUTH COR
+      const credencialesBase64 = Buffer.from(`${process.env.COR_API_KEY}:${process.env.COR_CLIENT_SECRET}`).toString('base64');
+      const tokenResponse = await fetch('https://api.projectcor.com/v1/oauth/token?grant_type=client_credentials', {
+        method: 'POST',
+        headers: { 'Authorization': `Basic ${credencialesBase64}`, 'Content-Type': 'application/json' }
+      });
+      if (!tokenResponse.ok) throw new Error("Fallo en autenticación de COR");
+      const tokenData = await tokenResponse.json();
+      const reqOpts = { method: 'GET', headers: { 'Authorization': `Bearer ${tokenData.access_token}`, 'Content-Type': 'application/json' } };
 
-      // Función auxiliar para agregar usuarios sin duplicar
-      const agregarAsignado = (lista, userId) => {
+      let allTasks = [];
+
+      // 3. EXTRACCIÓN ESCALONADA (Anti-Saturación de API)
+      for (const id of idsABuscar) {
+        const fetchPromises = [];
+        const colFilter = encodeURIComponent(JSON.stringify({ collaborator: id }));
+        const pmFilter = encodeURIComponent(JSON.stringify({ pm: id }));
+        
+        // v2 Colaborador (400 tareas) y PM (200 tareas)
+        for (let p = 1; p <= 4; p++) fetchPromises.push(fetch(`https://api.projectcor.com/v2/tasks?per_page=100&page=${p}&sort=updated_at&direction=desc&filters=${colFilter}`, reqOpts).then(r => r.ok ? r.json() : { data: [] }).catch(() => ({ data: [] })));
+        for (let p = 1; p <= 2; p++) fetchPromises.push(fetch(`https://api.projectcor.com/v2/tasks?per_page=100&page=${p}&sort=updated_at&direction=desc&filters=${pmFilter}`, reqOpts).then(r => r.ok ? r.json() : { data: [] }).catch(() => ({ data: [] })));
+        
+        // v1 Colaboradores (Subtareas planas) (400 tareas)
+        for (let p = 1; p <= 4; p++) fetchPromises.push(fetch(`https://api.projectcor.com/v1/tasks?collaborators=${id}&per_page=100&page=${p}`, reqOpts).then(r => r.ok ? r.json() : { data: [] }).catch(() => ({ data: [] })));
+
+        const results = await Promise.all(fetchPromises);
+        results.forEach(d => {
+          const list = Array.isArray(d) ? d : (d.data || d.items || []);
+          allTasks = allTasks.concat(list);
+        });
+      }
+
+      // 4. ESTRUCTURACIÓN DETERMINISTA (Hecha en código, no por IA)
+      const tasksUnicas = Array.from(new Map(allTasks.map(task => [task.id, task])).values());
+      const now = new Date();
+      
+      const reportePorUsuario = {};
+      idsABuscar.forEach(id => {
+        reportePorUsuario[NOMBRES_POR_ID[id]] = { activas: [], vencidas: [] };
+      });
+
+      const agregarAsignado = (listaIds, userId) => {
         if (!userId) return;
         const idNum = Number(typeof userId === 'object' ? (userId.id || userId.value) : userId);
-        if (idsABuscar.includes(idNum) && !lista.includes(NOMBRES_POR_ID[idNum])) {
-          lista.push(NOMBRES_POR_ID[idNum]);
+        if (idsABuscar.includes(idNum) && !listaIds.includes(NOMBRES_POR_ID[idNum])) {
+          listaIds.push(NOMBRES_POR_ID[idNum]);
         }
       };
 
@@ -111,12 +108,12 @@ export default async function handler(req, res) {
         const contextoProyecto = clientName ? `[${clientName} > ${projectName}]` : `[${projectName}]`;
 
         let deadlineStr = tarea.deadline || 'Sin fecha';
+        let isVencida = false;
         if (tarea.deadline) {
           const dateDeadline = new Date(tarea.deadline);
-          if (dateDeadline < now) deadlineStr = `[VENCIDA] ${deadlineStr}`;
+          if (dateDeadline < now) isVencida = true;
         }
 
-        // REINCORPORAMOS LA VERIFICACIÓN DE PM Y FOLLOWERS
         let asignadosParent = [];
         (tarea.collaborators || []).forEach(c => agregarAsignado(asignadosParent, c));
         (tarea.followers || []).forEach(f => agregarAsignado(asignadosParent, f));
@@ -124,25 +121,27 @@ export default async function handler(req, res) {
 
         if (asignadosParent.length > 0) {
           const isSubtask = tarea.task_father || tarea.parent_id;
-          tareasLimpias.push({
-            u: asignadosParent.join(" y "), 
-            c: contextoProyecto,
-            t: `${isSubtask ? '[Subtarea]' : '[Tarea]'} ${tarea.name || tarea.title || 'Sin título'}`,
-            d: deadlineStr
+          const tType = isSubtask ? '[Subtarea]' : '[Tarea]';
+          const itemText = `- **${contextoProyecto} ${tType} ${tarea.name || tarea.title || 'Sin título'}** | Vencimiento: ${deadlineStr}`;
+          
+          asignadosParent.forEach(nombre => {
+            if (isVencida) reportePorUsuario[nombre].vencidas.push(itemText);
+            else reportePorUsuario[nombre].activas.push(itemText);
           });
         }
 
+        // Subtareas anidadas
         if (tarea.subtasks && Array.isArray(tarea.subtasks)) {
           tarea.subtasks.forEach(sub => {
             if (sub.archived === true || sub.archived === 1) return;
-
             let subStatus = (typeof sub.status === 'string') ? sub.status.toLowerCase() : (sub.status?.name || '').toLowerCase();
             if (subStatus.includes('finalizad') || subStatus.includes('completad') || subStatus.includes('done') || subStatus.includes('aprobada') || subStatus.includes('entregada')) return;
 
             let subDeadlineStr = sub.deadline || tarea.deadline || 'Sin fecha';
+            let subIsVencida = false;
             if (subDeadlineStr !== 'Sin fecha') {
               const sDate = new Date(subDeadlineStr);
-              if (sDate < now) subDeadlineStr = `[VENCIDA] ${subDeadlineStr}`;
+              if (sDate < now) subIsVencida = true;
             }
 
             let asignadosSub = [];
@@ -151,36 +150,47 @@ export default async function handler(req, res) {
             agregarAsignado(asignadosSub, sub.pm);
 
             if (asignadosSub.length > 0) {
-              tareasLimpias.push({
-                u: asignadosSub.join(" y "),
-                c: contextoProyecto,
-                t: `[Subtarea] ${sub.name || sub.title || 'Sin título'}`,
-                d: subDeadlineStr
+              const itemText = `- **${contextoProyecto} [Subtarea] ${sub.name || sub.title || 'Sin título'}** | Vencimiento: ${subDeadlineStr}`;
+              asignadosSub.forEach(nombre => {
+                if (subIsVencida) reportePorUsuario[nombre].vencidas.push(itemText);
+                else reportePorUsuario[nombre].activas.push(itemText);
               });
             }
           });
         }
       });
 
-      const tareasFinales = Array.from(new Set(tareasLimpias.map(JSON.stringify))).map(JSON.parse);
+      // 5. CONSTRUCCIÓN DEL MENSAJE FINAL (Desduplicado y Preciso)
+      let finalSlackMessage = "";
+      let totalActivasGeneral = 0;
+      let totalVencidasGeneral = 0;
+      const datosParaIA = {}; // Resumen numérico para el prompt de la IA
 
-      // 5. Análisis de OpenAI
+      for (const nombre in reportePorUsuario) {
+        const activasUnicas = [...new Set(reportePorUsuario[nombre].activas)];
+        const vencidasUnicas = [...new Set(reportePorUsuario[nombre].vencidas)];
+        
+        totalActivasGeneral += activasUnicas.length;
+        totalVencidasGeneral += vencidasUnicas.length;
+        
+        finalSlackMessage += `\n# ${nombre}\n`;
+        finalSlackMessage += `\n## TAREAS ACTIVAS\n` + (activasUnicas.length > 0 ? activasUnicas.join('\n\n') : "- Ninguna") + `\n`;
+        finalSlackMessage += `\n## TAREAS VENCIDAS\n` + (vencidasUnicas.length > 0 ? vencidasUnicas.join('\n\n') : "- Ninguna") + `\n`;
+        finalSlackMessage += `\n---\n`;
+
+        datosParaIA[nombre] = { activas: activasUnicas.length, vencidas: vencidasUnicas.length };
+      }
+
+      finalSlackMessage += `\n**Recuento general:**\n- Tareas activas: ${totalActivasGeneral}\n- Tareas vencidas: ${totalVencidasGeneral}\n- Total: ${totalActivasGeneral + totalVencidasGeneral}\n\n`;
+
+      // 6. ANÁLISIS EXCLUSIVO DE LA IA (Súper rápido porque solo lee números)
       const fechaHoy = new Date().toLocaleString('es-AR', { timeZone: 'America/Buenos_Aires' });
-      const promptSistema = `Eres el coordinador de tráfico de Ninch. Hoy es ${fechaHoy}.
+      const promptSistema = `Eres el coordinador de tráfico de Ninch. Hoy es ${fechaHoy}. 
+      Te daré los números de tareas activas y vencidas de los colaboradores consultados.
+      Tu ÚNICA tarea es escribir un párrafo de 4 a 6 líneas bajo el título "### Veredicto de Disponibilidad" analizando la carga de trabajo general y concluyendo quién está más libre para tomar un nuevo proyecto.
+      ESTÁ ESTRICTAMENTE PROHIBIDO volver a escribir el listado de tareas. Sólo danos tu veredicto analítico.`;
       
-      REGLA DE ORO: DEBES MOSTRAR EL LISTADO COMPLETO DE TAREAS.
-      
-      ESTRUCTURA:
-      Para CADA persona (etiqueta "u"):
-      1. Título con su nombre.
-      2. "TAREAS ACTIVAS" (sin "[VENCIDA]") y "TAREAS VENCIDAS" (con "[VENCIDA]").
-      3. Formato: **[Cliente > Proyecto] Título** | Vencimiento: Fecha
-      
-      CIERRE:
-      - Recuento numérico.
-      - "### Veredicto de Disponibilidad": Párrafo analítico.`;
-      
-      const promptUsuario = `Solicitud: "${text}". \n\nDatos: ${JSON.stringify(tareasFinales)}`;
+      const promptUsuario = `Datos de carga de trabajo: ${JSON.stringify(datosParaIA)}. \nEscribe tu veredicto.`;
 
       const openaiResponse = await fetch('https://api.openai.com/v1/chat/completions', {
         method: 'POST',
@@ -188,18 +198,23 @@ export default async function handler(req, res) {
         body: JSON.stringify({
           model: "gpt-4o-mini",
           messages: [{ role: "system", content: promptSistema }, { role: "user", content: promptUsuario }],
-          temperature: 0.6 
+          temperature: 0.7 
         })
       });
       
-      if (!openaiResponse.ok) throw new Error("Error en la generación de OpenAI");
-      const openaiData = await openaiResponse.json();
-      const iaResponse = openaiData.choices?.[0]?.message?.content || "No se pudo generar el análisis.";
+      let iaResponse = "No se pudo generar el análisis.";
+      if (openaiResponse.ok) {
+        const openaiData = await openaiResponse.json();
+        iaResponse = openaiData.choices?.[0]?.message?.content || iaResponse;
+      }
+
+      // Concatenamos el reporte perfecto armado en código + el veredicto inteligente
+      finalSlackMessage += iaResponse;
 
       await fetch(response_url, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ response_type: "in_channel", text: iaResponse })
+        body: JSON.stringify({ response_type: "in_channel", text: finalSlackMessage })
       });
 
       return res.status(200).json({ success: true });
@@ -226,5 +241,5 @@ export default async function handler(req, res) {
   }).catch(console.error);
 
   await new Promise(resolve => setTimeout(resolve, 50));
-  return res.status(200).json({ response_type: "in_channel", text: "⏳ Buscando en todos los roles (Colaborador, PM, Follower)... Esto tomará unos segundos." });
+  return res.status(200).json({ response_type: "in_channel", text: "⏳ Extrayendo de forma blindada (separando reporte de IA)... Esto tomará unos segundos." });
 }
