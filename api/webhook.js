@@ -48,21 +48,23 @@ export default async function handler(req, res) {
 
       let allTasks = [];
 
-      // 3. EXTRACCIÓN POR FUERZA BRUTA (Traemos TODO lo del usuario, sin filtros que oculten data)
+      // 3. EXTRACCIÓN POR FUERZA BRUTA MASIVA
       if (idsABuscar.length > 0) {
         const fetchPromises = [];
         const reqOpts = { method: 'GET', headers: { 'Authorization': `Bearer ${tokenData.access_token}`, 'Content-Type': 'application/json' } };
 
         idsABuscar.forEach(id => {
-          // Buscamos sin "archived=2", pedimos TODO ordenado por más reciente.
           const filterStr = encodeURIComponent(JSON.stringify({ collaborator: id }));
-          fetchPromises.push(fetch(`https://api.projectcor.com/v2/tasks?per_page=100&page=1&sort=updated_at&direction=desc&filters=${filterStr}`, reqOpts).then(r => r.ok ? r.json() : { data: [] }).catch(() => ({ data: [] })));
-          fetchPromises.push(fetch(`https://api.projectcor.com/v2/tasks?per_page=100&page=2&sort=updated_at&direction=desc&filters=${filterStr}`, reqOpts).then(r => r.ok ? r.json() : { data: [] }).catch(() => ({ data: [] })));
-          fetchPromises.push(fetch(`https://api.projectcor.com/v2/tasks?per_page=100&page=3&sort=updated_at&direction=desc&filters=${filterStr}`, reqOpts).then(r => r.ok ? r.json() : { data: [] }).catch(() => ({ data: [] })));
           
-          // Llamadas de respaldo a la API v1 (la que usa la web)
-          fetchPromises.push(fetch(`https://api.projectcor.com/v1/tasks?collaborator_id=${id}&per_page=100&page=1`, reqOpts).then(r => r.ok ? r.json() : { data: [] }).catch(() => ({ data: [] })));
-          fetchPromises.push(fetch(`https://api.projectcor.com/v1/tasks?collaborators=${id}&per_page=100&page=1`, reqOpts).then(r => r.ok ? r.json() : { data: [] }).catch(() => ({ data: [] })));
+          // Hacemos un barrido de 5 páginas (500 tareas por persona) tanto en v2 como en v1
+          for (let page = 1; page <= 5; page++) {
+            // API v2
+            fetchPromises.push(fetch(`https://api.projectcor.com/v2/tasks?per_page=100&page=${page}&sort=updated_at&direction=desc&filters=${filterStr}`, reqOpts).then(r => r.ok ? r.json() : { data: [] }).catch(() => ({ data: [] })));
+            
+            // API v1 (la que usa la web, clave para subtareas planas)
+            fetchPromises.push(fetch(`https://api.projectcor.com/v1/tasks?collaborator_id=${id}&per_page=100&page=${page}`, reqOpts).then(r => r.ok ? r.json() : { data: [] }).catch(() => ({ data: [] })));
+            fetchPromises.push(fetch(`https://api.projectcor.com/v1/tasks?collaborators=${id}&per_page=100&page=${page}`, reqOpts).then(r => r.ok ? r.json() : { data: [] }).catch(() => ({ data: [] })));
+          }
         });
 
         const pagesResults = await Promise.all(fetchPromises);
@@ -80,19 +82,17 @@ export default async function handler(req, res) {
         return res.status(200).json({ success: true });
       }
 
-      // 4. LIMPIEZA ARTESANAL
+      // 4. LIMPIEZA ARTESANAL (¡SIN FILTRO DE TIEMPO!)
       const tasksUnicas = Array.from(new Map(allTasks.map(task => [task.id, task])).values());
       const tareasLimpias = [];
       
       const now = new Date();
-      const limiteFantasma = new Date();
-      limiteFantasma.setDate(now.getDate() - 30); // Extendimos el límite a 30 días para evitar perder tareas válidas pero viejas
 
       tasksUnicas.forEach(tarea => {
-        // FILTRO 1: Si la tarea está explícitamente archivada, la ignoramos.
+        // FILTRO 1: Archivadas explícitamente
         if (tarea.archived === true || tarea.archived === 1) return;
 
-        // FILTRO 2: Si el estado dice finalizada/completada, la ignoramos.
+        // FILTRO 2: Finalizadas/Completadas
         let statusName = (typeof tarea.status === 'string') ? tarea.status.toLowerCase() : (tarea.status?.name || '').toLowerCase();
         let currentStatus = (typeof tarea.current_status === 'string') ? tarea.current_status.toLowerCase() : (tarea.current_status?.name || '').toLowerCase();
         const combinedStatus = `${statusName} ${currentStatus}`;
@@ -105,12 +105,11 @@ export default async function handler(req, res) {
         let deadlineStr = tarea.deadline || 'Sin fecha';
         if (tarea.deadline) {
           const dateDeadline = new Date(tarea.deadline);
-          // Si venció hace más de 30 días, la descartamos.
-          if (dateDeadline < limiteFantasma) return; 
+          // ¡ADIÓS LIMITE FANTASMA! Solo verificamos si ya pasó la fecha de hoy para etiquetarla.
           if (dateDeadline < now) deadlineStr = `[VENCIDA] ${deadlineStr}`;
         }
 
-        // Verificamos quién está asignado (Soporta múltiples formatos de ID)
+        // Verificamos asignación
         let asignadosParent = [];
         (tarea.collaborators || []).forEach(c => {
           const colabId = typeof c === 'object' ? (c.id || c.value) : c;
@@ -127,7 +126,7 @@ export default async function handler(req, res) {
           });
         }
 
-        // Si trae subtareas anidadas, también las analizamos con la misma lógica
+        // Subtareas anidadas
         if (tarea.subtasks && Array.isArray(tarea.subtasks)) {
           tarea.subtasks.forEach(sub => {
             if (sub.archived === true || sub.archived === 1) return;
@@ -138,7 +137,6 @@ export default async function handler(req, res) {
             let subDeadlineStr = sub.deadline || tarea.deadline || 'Sin fecha';
             if (subDeadlineStr !== 'Sin fecha') {
               const sDate = new Date(subDeadlineStr);
-              if (sDate < limiteFantasma) return;
               if (sDate < now) subDeadlineStr = `[VENCIDA] ${subDeadlineStr}`;
             }
 
@@ -224,5 +222,5 @@ export default async function handler(req, res) {
   }).catch(console.error);
 
   await new Promise(resolve => setTimeout(resolve, 50));
-  return res.status(200).json({ response_type: "in_channel", text: "⏳ Extrayendo datos en crudo sin filtros... Esto tomará unos segundos." });
+  return res.status(200).json({ response_type: "in_channel", text: "⏳ Reflejando panel exacto de COR (sin límite de tiempo)... Esto tomará unos segundos." });
 }
