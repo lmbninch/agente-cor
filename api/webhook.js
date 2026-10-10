@@ -58,7 +58,7 @@ export default async function handler(req, res) {
 
       let allTasks = [];
 
-      // 3. EXTRACCIÓN MASIVA (Datos crudos en segundo plano)
+      // 3. EXTRACCIÓN MASIVA 
       for (const id of idsABuscar) {
         const fetchPromises = [];
         const colFilter = encodeURIComponent(JSON.stringify({ collaborator: id }));
@@ -75,13 +75,20 @@ export default async function handler(req, res) {
         });
       }
 
-      // 4. LIMPIEZA INVISIBLE
+      // 4. CÁLCULO MATEMÁTICO DE LOS 7 DÍAS (100% Determinista)
       const tasksUnicas = Array.from(new Map(allTasks.map(task => [task.id, task])).values());
       const now = new Date();
-      const reporteParaIA = {};
-      
+      const nextWeek = new Date();
+      nextWeek.setDate(now.getDate() + 7);
+
+      const reportePorUsuario = {};
       idsABuscar.forEach(id => {
-        reporteParaIA[NOMBRES_POR_ID[id]] = { activas: [], vencidas: [] };
+        reportePorUsuario[NOMBRES_POR_ID[id]] = {
+          totalAsignadas: 0,
+          vencidas: 0,
+          sinDeadline: 0,
+          proximos7Dias: []
+        };
       });
 
       const agregarAsignado = (listaIds, userId) => {
@@ -101,12 +108,22 @@ export default async function handler(req, res) {
         if (combinedStatus.includes('finalizad') || combinedStatus.includes('completad') || combinedStatus.includes('done') || combinedStatus.includes('aprobada') || combinedStatus.includes('entregada')) return;
 
         const clientName = tarea.project?.client?.name || tarea.client?.name || 'Varios';
-        let deadlineStr = tarea.deadline || 'Sin fecha';
-        let isVencida = false;
         
-        if (tarea.deadline) {
+        let isSinFecha = false;
+        let isVencida = false;
+        let isProximos7 = false;
+        let deadlineStr = 'Sin fecha';
+
+        if (!tarea.deadline) {
+          isSinFecha = true;
+        } else {
           const dateDeadline = new Date(tarea.deadline);
-          if (dateDeadline < now) isVencida = true;
+          deadlineStr = tarea.deadline.split(' ')[0]; // Corta la hora, deja solo YYYY-MM-DD
+          if (dateDeadline < now) {
+            isVencida = true;
+          } else if (dateDeadline <= nextWeek) {
+            isProximos7 = true;
+          }
         }
 
         let asignadosParent = [];
@@ -115,10 +132,14 @@ export default async function handler(req, res) {
         agregarAsignado(asignadosParent, tarea.pm);
 
         if (asignadosParent.length > 0) {
-          const itemText = `[${clientName}] ${tarea.name || tarea.title || 'Sin título'} (Vence: ${deadlineStr})`;
+          const tType = (tarea.task_father || tarea.parent_id) ? '[Subtarea]' : '[Tarea]';
+          const itemText = `- **[${clientName}]** ${tType} ${tarea.name || tarea.title || 'Sin título'} (Vence: ${deadlineStr})`;
+          
           asignadosParent.forEach(nombre => {
-            if (isVencida) reporteParaIA[nombre].vencidas.push(itemText);
-            else reporteParaIA[nombre].activas.push(itemText);
+            reportePorUsuario[nombre].totalAsignadas++;
+            if (isSinFecha) reportePorUsuario[nombre].sinDeadline++;
+            else if (isVencida) reportePorUsuario[nombre].vencidas++;
+            else if (isProximos7) reportePorUsuario[nombre].proximos7Dias.push(itemText);
           });
         }
 
@@ -128,11 +149,19 @@ export default async function handler(req, res) {
             let subStatus = (typeof sub.status === 'string') ? sub.status.toLowerCase() : (sub.status?.name || '').toLowerCase();
             if (subStatus.includes('finalizad') || subStatus.includes('completad') || subStatus.includes('done') || subStatus.includes('aprobada') || subStatus.includes('entregada')) return;
 
-            let subDeadlineStr = sub.deadline || tarea.deadline || 'Sin fecha';
+            let subIsSinFecha = false;
             let subIsVencida = false;
-            if (subDeadlineStr !== 'Sin fecha') {
-              const sDate = new Date(subDeadlineStr);
-              if (sDate < now) subIsVencida = true;
+            let subIsProximos7 = false;
+            let subDeadlineStr = 'Sin fecha';
+
+            if (!sub.deadline && !tarea.deadline) {
+              subIsSinFecha = true;
+            } else {
+              const dateTarget = sub.deadline || tarea.deadline;
+              const dateDeadline = new Date(dateTarget);
+              subDeadlineStr = dateTarget.split(' ')[0];
+              if (dateDeadline < now) subIsVencida = true;
+              else if (dateDeadline <= nextWeek) subIsProximos7 = true;
             }
 
             let asignadosSub = [];
@@ -141,37 +170,50 @@ export default async function handler(req, res) {
             agregarAsignado(asignadosSub, sub.pm);
 
             if (asignadosSub.length > 0) {
-              const itemText = `[${clientName}] [Subtarea] ${sub.name || sub.title || 'Sin título'} (Vence: ${subDeadlineStr})`;
+              const itemText = `- **[${clientName}]** [Subtarea] ${sub.name || sub.title || 'Sin título'} (Vence: ${subDeadlineStr})`;
               asignadosSub.forEach(nombre => {
-                if (subIsVencida) reporteParaIA[nombre].vencidas.push(itemText);
-                else reporteParaIA[nombre].activas.push(itemText);
+                reportePorUsuario[nombre].totalAsignadas++;
+                if (subIsSinFecha) reportePorUsuario[nombre].sinDeadline++;
+                else if (subIsVencida) reportePorUsuario[nombre].vencidas++;
+                else if (subIsProximos7) reportePorUsuario[nombre].proximos7Dias.push(itemText);
               });
             }
           });
         }
       });
 
-      // 5. REDACCIÓN DEL REPORTE EJECUTIVO POR IA
-      const fechaHoy = new Date().toLocaleString('es-AR', { timeZone: 'America/Buenos_Aires' });
-      const promptSistema = `Eres el Director de Tráfico de Ninch. Hoy es ${fechaHoy}.
-      Recibes un JSON con todas las tareas extraídas de la plataforma de gestión. El volumen es tan alto que una lista completa arruinaría la lectura en Slack.
-      
-      Tu objetivo es redactar un REPORTE EJECUTIVO fácil de leer. ESTÁ PROHIBIDO listar todas las tareas.
-      
-      ESTRUCTURA ESTRICTA POR PERSONA:
-      # [Nombre del Colaborador]
-      * 📊 **Volumen de Trabajo:** [X] Tareas Activas | [Y] Tareas Vencidas
-      * 🏢 **Foco Actual:** [Menciona brevemente los 3 o 4 clientes/marcas principales que concentran su volumen de tareas]
-      * 🚨 **Top 3 Urgencias:** [Lista en viñetas únicamente las 3 tareas más críticas. Prioriza las vencidas o las que vencen en las próximas 48hs. Usa el formato: **[Cliente]** Título de la tarea]
-      * 🧠 **Veredicto de Disponibilidad:** [Un párrafo analítico de 3 líneas dictaminando si está disponible para un nuevo proyecto pesado o si su agenda requiere asistencia]`;
-      
-      // Eliminamos duplicados antes de pasar a la IA para ahorrar tokens
-      for (const nom in reporteParaIA) {
-        reporteParaIA[nom].activas = [...new Set(reporteParaIA[nom].activas)];
-        reporteParaIA[nom].vencidas = [...new Set(reporteParaIA[nom].vencidas)];
+      // 5. ARMADO DEL REPORTE FINAL Y LLAMADA A LA IA
+      let finalSlackMessage = "";
+      const datosParaIA = {};
+
+      for (const nombre in reportePorUsuario) {
+        const data = reportePorUsuario[nombre];
+        const vencidasOSinDeadline = data.vencidas + data.sinDeadline;
+        
+        finalSlackMessage += `\n# ${nombre}\n`;
+        finalSlackMessage += `- **Total de tareas asignadas:** ${data.totalAsignadas}\n`;
+        finalSlackMessage += `- **Total tareas vencidas o sin deadline:** ${vencidasOSinDeadline} (${data.vencidas} vencidas, ${data.sinDeadline} sin fecha)\n\n`;
+        finalSlackMessage += `## Tareas que vencen en los próximos 7 días:\n`;
+        
+        const tareas7DiasUnicas = [...new Set(data.proximos7Dias)];
+        if (tareas7DiasUnicas.length > 0) {
+          finalSlackMessage += tareas7DiasUnicas.join('\n') + `\n`;
+        } else {
+          finalSlackMessage += `- Ninguna tarea urgente en esta ventana.\n`;
+        }
+        finalSlackMessage += `\n---\n`;
+
+        datosParaIA[nombre] = { totalAsignadas: data.totalAsignadas, tareasVencidasOSinFecha: vencidasOSinDeadline, proximos7Dias: tareas7DiasUnicas.length };
       }
 
-      const promptUsuario = `Datos masivos de COR: ${JSON.stringify(reporteParaIA)}. Redacta el reporte ejecutivo.`;
+      // Redacción del Veredicto por la IA (Solo texto, sin listas)
+      const promptSistema = `Eres el Director de Tráfico de Ninch. 
+      Recibes los datos duros de la carga de trabajo del equipo.
+      Tu ÚNICA tarea es escribir el "### Veredicto de Disponibilidad" al final del reporte.
+      Redacta un único párrafo analítico y profesional (4-5 líneas máximo) cruzando el volumen total asignado y lo que tienen pendiente en los próximos 7 días, para recomendar si pueden o no tomar un proyecto nuevo.
+      PROHIBIDO escribir listas de tareas. Solo debes enviar el texto del veredicto.`;
+      
+      const promptUsuario = `Datos numéricos de carga de trabajo: ${JSON.stringify(datosParaIA)}. \nEscribe el veredicto.`;
 
       const openaiResponse = await fetch('https://api.openai.com/v1/chat/completions', {
         method: 'POST',
@@ -179,20 +221,22 @@ export default async function handler(req, res) {
         body: JSON.stringify({
           model: "gpt-4o-mini",
           messages: [{ role: "system", content: promptSistema }, { role: "user", content: promptUsuario }],
-          temperature: 0.5 
+          temperature: 0.6 
         })
       });
       
-      let iaResponse = "No se pudo generar el análisis.";
+      let iaResponse = "No se pudo generar el análisis de disponibilidad.";
       if (openaiResponse.ok) {
         const openaiData = await openaiResponse.json();
         iaResponse = openaiData.choices?.[0]?.message?.content || iaResponse;
       }
 
+      finalSlackMessage += `\n${iaResponse}`;
+
       await fetch(response_url, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ response_type: "in_channel", text: iaResponse })
+        body: JSON.stringify({ response_type: "in_channel", text: finalSlackMessage })
       });
 
       return res.status(200).json({ success: true });
@@ -219,5 +263,5 @@ export default async function handler(req, res) {
   }).catch(console.error);
 
   await new Promise(resolve => setTimeout(resolve, 50));
-  return res.status(200).json({ response_type: "in_channel", text: "⏳ Procesando datos y redactando Reporte Ejecutivo..." });
+  return res.status(200).json({ response_type: "in_channel", text: "⏳ Calculando métricas y ventana de 7 días... Esto tomará unos segundos." });
 }
