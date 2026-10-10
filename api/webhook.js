@@ -58,17 +58,14 @@ export default async function handler(req, res) {
 
       let allTasks = [];
 
-      // 3. EXTRACCIÓN ESCALONADA (Anti-Saturación de API)
+      // 3. EXTRACCIÓN MASIVA (Datos crudos en segundo plano)
       for (const id of idsABuscar) {
         const fetchPromises = [];
         const colFilter = encodeURIComponent(JSON.stringify({ collaborator: id }));
         const pmFilter = encodeURIComponent(JSON.stringify({ pm: id }));
         
-        // v2 Colaborador (400 tareas) y PM (200 tareas)
         for (let p = 1; p <= 4; p++) fetchPromises.push(fetch(`https://api.projectcor.com/v2/tasks?per_page=100&page=${p}&sort=updated_at&direction=desc&filters=${colFilter}`, reqOpts).then(r => r.ok ? r.json() : { data: [] }).catch(() => ({ data: [] })));
         for (let p = 1; p <= 2; p++) fetchPromises.push(fetch(`https://api.projectcor.com/v2/tasks?per_page=100&page=${p}&sort=updated_at&direction=desc&filters=${pmFilter}`, reqOpts).then(r => r.ok ? r.json() : { data: [] }).catch(() => ({ data: [] })));
-        
-        // v1 Colaboradores (Subtareas planas) (400 tareas)
         for (let p = 1; p <= 4; p++) fetchPromises.push(fetch(`https://api.projectcor.com/v1/tasks?collaborators=${id}&per_page=100&page=${p}`, reqOpts).then(r => r.ok ? r.json() : { data: [] }).catch(() => ({ data: [] })));
 
         const results = await Promise.all(fetchPromises);
@@ -78,13 +75,13 @@ export default async function handler(req, res) {
         });
       }
 
-      // 4. ESTRUCTURACIÓN DETERMINISTA (Hecha en código, no por IA)
+      // 4. LIMPIEZA INVISIBLE
       const tasksUnicas = Array.from(new Map(allTasks.map(task => [task.id, task])).values());
       const now = new Date();
+      const reporteParaIA = {};
       
-      const reportePorUsuario = {};
       idsABuscar.forEach(id => {
-        reportePorUsuario[NOMBRES_POR_ID[id]] = { activas: [], vencidas: [] };
+        reporteParaIA[NOMBRES_POR_ID[id]] = { activas: [], vencidas: [] };
       });
 
       const agregarAsignado = (listaIds, userId) => {
@@ -103,12 +100,10 @@ export default async function handler(req, res) {
         const combinedStatus = `${statusName} ${currentStatus}`;
         if (combinedStatus.includes('finalizad') || combinedStatus.includes('completad') || combinedStatus.includes('done') || combinedStatus.includes('aprobada') || combinedStatus.includes('entregada')) return;
 
-        const projectName = tarea.project?.name || 'Proyecto Gral';
-        const clientName = tarea.project?.client?.name || tarea.client?.name || '';
-        const contextoProyecto = clientName ? `[${clientName} > ${projectName}]` : `[${projectName}]`;
-
+        const clientName = tarea.project?.client?.name || tarea.client?.name || 'Varios';
         let deadlineStr = tarea.deadline || 'Sin fecha';
         let isVencida = false;
+        
         if (tarea.deadline) {
           const dateDeadline = new Date(tarea.deadline);
           if (dateDeadline < now) isVencida = true;
@@ -120,17 +115,13 @@ export default async function handler(req, res) {
         agregarAsignado(asignadosParent, tarea.pm);
 
         if (asignadosParent.length > 0) {
-          const isSubtask = tarea.task_father || tarea.parent_id;
-          const tType = isSubtask ? '[Subtarea]' : '[Tarea]';
-          const itemText = `- **${contextoProyecto} ${tType} ${tarea.name || tarea.title || 'Sin título'}** | Vencimiento: ${deadlineStr}`;
-          
+          const itemText = `[${clientName}] ${tarea.name || tarea.title || 'Sin título'} (Vence: ${deadlineStr})`;
           asignadosParent.forEach(nombre => {
-            if (isVencida) reportePorUsuario[nombre].vencidas.push(itemText);
-            else reportePorUsuario[nombre].activas.push(itemText);
+            if (isVencida) reporteParaIA[nombre].vencidas.push(itemText);
+            else reporteParaIA[nombre].activas.push(itemText);
           });
         }
 
-        // Subtareas anidadas
         if (tarea.subtasks && Array.isArray(tarea.subtasks)) {
           tarea.subtasks.forEach(sub => {
             if (sub.archived === true || sub.archived === 1) return;
@@ -150,47 +141,37 @@ export default async function handler(req, res) {
             agregarAsignado(asignadosSub, sub.pm);
 
             if (asignadosSub.length > 0) {
-              const itemText = `- **${contextoProyecto} [Subtarea] ${sub.name || sub.title || 'Sin título'}** | Vencimiento: ${subDeadlineStr}`;
+              const itemText = `[${clientName}] [Subtarea] ${sub.name || sub.title || 'Sin título'} (Vence: ${subDeadlineStr})`;
               asignadosSub.forEach(nombre => {
-                if (subIsVencida) reportePorUsuario[nombre].vencidas.push(itemText);
-                else reportePorUsuario[nombre].activas.push(itemText);
+                if (subIsVencida) reporteParaIA[nombre].vencidas.push(itemText);
+                else reporteParaIA[nombre].activas.push(itemText);
               });
             }
           });
         }
       });
 
-      // 5. CONSTRUCCIÓN DEL MENSAJE FINAL (Desduplicado y Preciso)
-      let finalSlackMessage = "";
-      let totalActivasGeneral = 0;
-      let totalVencidasGeneral = 0;
-      const datosParaIA = {}; // Resumen numérico para el prompt de la IA
-
-      for (const nombre in reportePorUsuario) {
-        const activasUnicas = [...new Set(reportePorUsuario[nombre].activas)];
-        const vencidasUnicas = [...new Set(reportePorUsuario[nombre].vencidas)];
-        
-        totalActivasGeneral += activasUnicas.length;
-        totalVencidasGeneral += vencidasUnicas.length;
-        
-        finalSlackMessage += `\n# ${nombre}\n`;
-        finalSlackMessage += `\n## TAREAS ACTIVAS\n` + (activasUnicas.length > 0 ? activasUnicas.join('\n\n') : "- Ninguna") + `\n`;
-        finalSlackMessage += `\n## TAREAS VENCIDAS\n` + (vencidasUnicas.length > 0 ? vencidasUnicas.join('\n\n') : "- Ninguna") + `\n`;
-        finalSlackMessage += `\n---\n`;
-
-        datosParaIA[nombre] = { activas: activasUnicas.length, vencidas: vencidasUnicas.length };
+      // 5. REDACCIÓN DEL REPORTE EJECUTIVO POR IA
+      const fechaHoy = new Date().toLocaleString('es-AR', { timeZone: 'America/Buenos_Aires' });
+      const promptSistema = `Eres el Director de Tráfico de Ninch. Hoy es ${fechaHoy}.
+      Recibes un JSON con todas las tareas extraídas de la plataforma de gestión. El volumen es tan alto que una lista completa arruinaría la lectura en Slack.
+      
+      Tu objetivo es redactar un REPORTE EJECUTIVO fácil de leer. ESTÁ PROHIBIDO listar todas las tareas.
+      
+      ESTRUCTURA ESTRICTA POR PERSONA:
+      # [Nombre del Colaborador]
+      * 📊 **Volumen de Trabajo:** [X] Tareas Activas | [Y] Tareas Vencidas
+      * 🏢 **Foco Actual:** [Menciona brevemente los 3 o 4 clientes/marcas principales que concentran su volumen de tareas]
+      * 🚨 **Top 3 Urgencias:** [Lista en viñetas únicamente las 3 tareas más críticas. Prioriza las vencidas o las que vencen en las próximas 48hs. Usa el formato: **[Cliente]** Título de la tarea]
+      * 🧠 **Veredicto de Disponibilidad:** [Un párrafo analítico de 3 líneas dictaminando si está disponible para un nuevo proyecto pesado o si su agenda requiere asistencia]`;
+      
+      // Eliminamos duplicados antes de pasar a la IA para ahorrar tokens
+      for (const nom in reporteParaIA) {
+        reporteParaIA[nom].activas = [...new Set(reporteParaIA[nom].activas)];
+        reporteParaIA[nom].vencidas = [...new Set(reporteParaIA[nom].vencidas)];
       }
 
-      finalSlackMessage += `\n**Recuento general:**\n- Tareas activas: ${totalActivasGeneral}\n- Tareas vencidas: ${totalVencidasGeneral}\n- Total: ${totalActivasGeneral + totalVencidasGeneral}\n\n`;
-
-      // 6. ANÁLISIS EXCLUSIVO DE LA IA (Súper rápido porque solo lee números)
-      const fechaHoy = new Date().toLocaleString('es-AR', { timeZone: 'America/Buenos_Aires' });
-      const promptSistema = `Eres el coordinador de tráfico de Ninch. Hoy es ${fechaHoy}. 
-      Te daré los números de tareas activas y vencidas de los colaboradores consultados.
-      Tu ÚNICA tarea es escribir un párrafo de 4 a 6 líneas bajo el título "### Veredicto de Disponibilidad" analizando la carga de trabajo general y concluyendo quién está más libre para tomar un nuevo proyecto.
-      ESTÁ ESTRICTAMENTE PROHIBIDO volver a escribir el listado de tareas. Sólo danos tu veredicto analítico.`;
-      
-      const promptUsuario = `Datos de carga de trabajo: ${JSON.stringify(datosParaIA)}. \nEscribe tu veredicto.`;
+      const promptUsuario = `Datos masivos de COR: ${JSON.stringify(reporteParaIA)}. Redacta el reporte ejecutivo.`;
 
       const openaiResponse = await fetch('https://api.openai.com/v1/chat/completions', {
         method: 'POST',
@@ -198,7 +179,7 @@ export default async function handler(req, res) {
         body: JSON.stringify({
           model: "gpt-4o-mini",
           messages: [{ role: "system", content: promptSistema }, { role: "user", content: promptUsuario }],
-          temperature: 0.7 
+          temperature: 0.5 
         })
       });
       
@@ -208,13 +189,10 @@ export default async function handler(req, res) {
         iaResponse = openaiData.choices?.[0]?.message?.content || iaResponse;
       }
 
-      // Concatenamos el reporte perfecto armado en código + el veredicto inteligente
-      finalSlackMessage += iaResponse;
-
       await fetch(response_url, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ response_type: "in_channel", text: finalSlackMessage })
+        body: JSON.stringify({ response_type: "in_channel", text: iaResponse })
       });
 
       return res.status(200).json({ success: true });
@@ -241,5 +219,5 @@ export default async function handler(req, res) {
   }).catch(console.error);
 
   await new Promise(resolve => setTimeout(resolve, 50));
-  return res.status(200).json({ response_type: "in_channel", text: "⏳ Extrayendo de forma blindada (separando reporte de IA)... Esto tomará unos segundos." });
+  return res.status(200).json({ response_type: "in_channel", text: "⏳ Procesando datos y redactando Reporte Ejecutivo..." });
 }
