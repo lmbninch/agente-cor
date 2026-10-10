@@ -1,15 +1,12 @@
 export default async function handler(req, res) {
   if (req.method !== 'POST') return res.status(405).json({ error: 'Solo POST' });
 
-  // =========================================================================
-  // PARTE 1: MODO SEGUNDO PLANO
-  // =========================================================================
   if (req.body.is_background) {
     try {
       const { text, response_url } = req.body;
       const textoLower = text.toLowerCase();
 
-      // 1. DIRECTORIO OFICIAL DEL EQUIPO CREATIVO
+      // 1. DIRECTORIO Y MAPEOS
       const DIRECTORIO_CREATIVO = {
         "nasa": 103413, "lombardo": 103413, "agustina perez": 103414,
         "carolina": 103421, "dorso": 103421, "vanesa": 103434, "copes": 103434,
@@ -40,47 +37,33 @@ export default async function handler(req, res) {
         }
       }
 
-      // 2. COR Auth
+      // 2. AUTH COR
       const credencialesBase64 = Buffer.from(`${process.env.COR_API_KEY}:${process.env.COR_CLIENT_SECRET}`).toString('base64');
       const tokenResponse = await fetch('https://api.projectcor.com/v1/oauth/token?grant_type=client_credentials', {
         method: 'POST',
         headers: { 'Authorization': `Basic ${credencialesBase64}`, 'Content-Type': 'application/json' }
       });
-      
       if (!tokenResponse.ok) throw new Error("Fallo en autenticación de COR");
       const tokenData = await tokenResponse.json();
 
       let allTasks = [];
 
+      // 3. EXTRACCIÓN POR FUERZA BRUTA (Traemos TODO lo del usuario, sin filtros que oculten data)
       if (idsABuscar.length > 0) {
         const fetchPromises = [];
         const reqOpts = { method: 'GET', headers: { 'Authorization': `Bearer ${tokenData.access_token}`, 'Content-Type': 'application/json' } };
 
-        // A. EXTRACCIÓN DIRECTA DE URL (Por si pegás un link en Slack)
-        const urlMatch = text.match(/tasks\/(\d+)/);
-        if (urlMatch && urlMatch[1]) {
-          const taskId = urlMatch[1];
-          fetchPromises.push(
-            fetch(`https://api.projectcor.com/v1/tasks/${taskId}`, reqOpts)
-              .then(r => r.ok ? r.json() : null)
-              .then(data => data ? { data: [data] } : { data: [] })
-              .catch(() => ({ data: [] }))
-          );
-        }
-
-        // B. ATAQUE QUIRÚRGICO (Buscamos al usuario en v2 y v1 simultáneamente)
         idsABuscar.forEach(id => {
+          // Buscamos sin "archived=2", pedimos TODO ordenado por más reciente.
           const filterStr = encodeURIComponent(JSON.stringify({ collaborator: id }));
-          fetchPromises.push(fetch(`https://api.projectcor.com/v2/tasks?archived=2&per_page=100&filters=${filterStr}`, reqOpts).then(r => r.ok ? r.json() : { data: [] }).catch(() => ({ data: [] })));
-          fetchPromises.push(fetch(`https://api.projectcor.com/v1/tasks?collaborator_id=${id}&per_page=100`, reqOpts).then(r => r.ok ? r.json() : { data: [] }).catch(() => ({ data: [] })));
-          fetchPromises.push(fetch(`https://api.projectcor.com/v1/tasks?collaborators=${id}&per_page=100`, reqOpts).then(r => r.ok ? r.json() : { data: [] }).catch(() => ({ data: [] })));
+          fetchPromises.push(fetch(`https://api.projectcor.com/v2/tasks?per_page=100&page=1&sort=updated_at&direction=desc&filters=${filterStr}`, reqOpts).then(r => r.ok ? r.json() : { data: [] }).catch(() => ({ data: [] })));
+          fetchPromises.push(fetch(`https://api.projectcor.com/v2/tasks?per_page=100&page=2&sort=updated_at&direction=desc&filters=${filterStr}`, reqOpts).then(r => r.ok ? r.json() : { data: [] }).catch(() => ({ data: [] })));
+          fetchPromises.push(fetch(`https://api.projectcor.com/v2/tasks?per_page=100&page=3&sort=updated_at&direction=desc&filters=${filterStr}`, reqOpts).then(r => r.ok ? r.json() : { data: [] }).catch(() => ({ data: [] })));
+          
+          // Llamadas de respaldo a la API v1 (la que usa la web)
+          fetchPromises.push(fetch(`https://api.projectcor.com/v1/tasks?collaborator_id=${id}&per_page=100&page=1`, reqOpts).then(r => r.ok ? r.json() : { data: [] }).catch(() => ({ data: [] })));
+          fetchPromises.push(fetch(`https://api.projectcor.com/v1/tasks?collaborators=${id}&per_page=100&page=1`, reqOpts).then(r => r.ok ? r.json() : { data: [] }).catch(() => ({ data: [] })));
         });
-
-        // C. RED DE ARRASTRE MASIVA (10 páginas en v2 + 10 páginas en v1 para pescar subtareas planas)
-        for (let page = 1; page <= 10; page++) {
-          fetchPromises.push(fetch(`https://api.projectcor.com/v2/tasks?archived=2&per_page=100&page=${page}`, reqOpts).then(r => r.ok ? r.json() : { data: [] }).catch(() => ({ data: [] })));
-          fetchPromises.push(fetch(`https://api.projectcor.com/v1/tasks?archived=false&per_page=100&page=${page}`, reqOpts).then(r => r.ok ? r.json() : { data: [] }).catch(() => ({ data: [] })));
-        }
 
         const pagesResults = await Promise.all(fetchPromises);
         pagesResults.forEach(data => {
@@ -97,88 +80,75 @@ export default async function handler(req, res) {
         return res.status(200).json({ success: true });
       }
 
-      // 3. LIMPIEZA Y CLASIFICACIÓN
+      // 4. LIMPIEZA ARTESANAL
       const tasksUnicas = Array.from(new Map(allTasks.map(task => [task.id, task])).values());
       const tareasLimpias = [];
       
       const now = new Date();
       const limiteFantasma = new Date();
-      limiteFantasma.setDate(now.getDate() - 15);
+      limiteFantasma.setDate(now.getDate() - 30); // Extendimos el límite a 30 días para evitar perder tareas válidas pero viejas
 
       tasksUnicas.forEach(tarea => {
+        // FILTRO 1: Si la tarea está explícitamente archivada, la ignoramos.
+        if (tarea.archived === true || tarea.archived === 1) return;
+
+        // FILTRO 2: Si el estado dice finalizada/completada, la ignoramos.
+        let statusName = (typeof tarea.status === 'string') ? tarea.status.toLowerCase() : (tarea.status?.name || '').toLowerCase();
+        let currentStatus = (typeof tarea.current_status === 'string') ? tarea.current_status.toLowerCase() : (tarea.current_status?.name || '').toLowerCase();
+        const combinedStatus = `${statusName} ${currentStatus}`;
+        if (combinedStatus.includes('finalizad') || combinedStatus.includes('completad') || combinedStatus.includes('done') || combinedStatus.includes('aprobada') || combinedStatus.includes('entregada')) return;
+
         const projectName = tarea.project?.name || 'Proyecto Gral';
         const clientName = tarea.project?.client?.name || tarea.client?.name || '';
         const contextoProyecto = clientName ? `[${clientName} > ${projectName}]` : `[${projectName}]`;
 
-        // Traducción de estados
-        let statusName = '';
-        if (typeof tarea.status === 'string') statusName = tarea.status.toLowerCase();
-        else if (tarea.status && tarea.status.name) statusName = tarea.status.name.toLowerCase();
-        
-        let currentStatus = '';
-        if (typeof tarea.current_status === 'string') currentStatus = tarea.current_status.toLowerCase();
-        else if (tarea.current_status && tarea.current_status.name) currentStatus = tarea.current_status.name.toLowerCase();
-
-        const combinedStatus = `${statusName} ${currentStatus}`;
-        const isParentFinished = combinedStatus.includes('finalizad') || combinedStatus.includes('completad') || combinedStatus.includes('done') || combinedStatus.includes('aprobada') || combinedStatus.includes('entregada');
-
         let deadlineStr = tarea.deadline || 'Sin fecha';
-        let validParentTime = true;
         if (tarea.deadline) {
           const dateDeadline = new Date(tarea.deadline);
-          if (dateDeadline < limiteFantasma) validParentTime = false;
+          // Si venció hace más de 30 días, la descartamos.
+          if (dateDeadline < limiteFantasma) return; 
           if (dateDeadline < now) deadlineStr = `[VENCIDA] ${deadlineStr}`;
         }
 
-        // ¿A quién pertenece?
+        // Verificamos quién está asignado (Soporta múltiples formatos de ID)
         let asignadosParent = [];
         (tarea.collaborators || []).forEach(c => {
-          const colabId = c.id || c;
-          if (idsABuscar.includes(colabId)) asignadosParent.push(NOMBRES_POR_ID[colabId] || "Colaborador");
+          const colabId = typeof c === 'object' ? (c.id || c.value) : c;
+          if (idsABuscar.includes(Number(colabId))) asignadosParent.push(NOMBRES_POR_ID[Number(colabId)]);
         });
-        if (tarea.pm) {
-          const pmId = tarea.pm.id || tarea.pm;
-          if (idsABuscar.includes(pmId) && !asignadosParent.includes(NOMBRES_POR_ID[pmId])) {
-            asignadosParent.push(NOMBRES_POR_ID[pmId] || "PM");
-          }
-        }
 
-        if (asignadosParent.length > 0 && !isParentFinished && validParentTime) {
-          // Detecta si vino plana de la v1 y es subtarea
-          const isActuallySubtask = tarea.task_father || tarea.parent_id;
-          const taskTypeLabel = isActuallySubtask ? '[Subtarea]' : '[Tarea]';
+        if (asignadosParent.length > 0) {
+          const isSubtask = tarea.task_father || tarea.parent_id;
           tareasLimpias.push({
             u: asignadosParent.join(" y "), 
             c: contextoProyecto,
-            t: `${taskTypeLabel} ${tarea.name || tarea.title || 'Sin título'}`,
+            t: `${isSubtask ? '[Subtarea]' : '[Tarea]'} ${tarea.name || tarea.title || 'Sin título'}`,
             d: deadlineStr
           });
         }
 
-        // Subtareas anidadas (por si viajan dentro de la v2)
+        // Si trae subtareas anidadas, también las analizamos con la misma lógica
         if (tarea.subtasks && Array.isArray(tarea.subtasks)) {
           tarea.subtasks.forEach(sub => {
-            let subStatusName = '';
-            if (typeof sub.status === 'string') subStatusName = sub.status.toLowerCase();
-            else if (sub.status && sub.status.name) subStatusName = sub.status.name.toLowerCase();
+            if (sub.archived === true || sub.archived === 1) return;
 
-            if (subStatusName.includes('finalizad') || subStatusName.includes('completad') || subStatusName.includes('done') || subStatusName.includes('aprobada') || subStatusName.includes('entregada')) return;
+            let subStatus = (typeof sub.status === 'string') ? sub.status.toLowerCase() : (sub.status?.name || '').toLowerCase();
+            if (subStatus.includes('finalizad') || subStatus.includes('completad') || subStatus.includes('done') || subStatus.includes('aprobada') || subStatus.includes('entregada')) return;
 
             let subDeadlineStr = sub.deadline || tarea.deadline || 'Sin fecha';
-            let validSubTime = true;
             if (subDeadlineStr !== 'Sin fecha') {
               const sDate = new Date(subDeadlineStr);
-              if (sDate < limiteFantasma) validSubTime = false;
+              if (sDate < limiteFantasma) return;
               if (sDate < now) subDeadlineStr = `[VENCIDA] ${subDeadlineStr}`;
             }
 
             let asignadosSub = [];
             (sub.collaborators || []).forEach(c => {
-              const colabId = c.id || c;
-              if (idsABuscar.includes(colabId)) asignadosSub.push(NOMBRES_POR_ID[colabId] || "Colaborador");
+              const colabId = typeof c === 'object' ? (c.id || c.value) : c;
+              if (idsABuscar.includes(Number(colabId))) asignadosSub.push(NOMBRES_POR_ID[Number(colabId)]);
             });
 
-            if (asignadosSub.length > 0 && validSubTime) {
+            if (asignadosSub.length > 0) {
               tareasLimpias.push({
                 u: asignadosSub.join(" y "),
                 c: contextoProyecto,
@@ -192,38 +162,30 @@ export default async function handler(req, res) {
 
       const tareasFinales = Array.from(new Set(tareasLimpias.map(JSON.stringify))).map(JSON.parse);
 
-      // 4. Análisis de OpenAI 
+      // 5. Análisis de OpenAI
       const fechaHoy = new Date().toLocaleString('es-AR', { timeZone: 'America/Buenos_Aires' });
-
-      const promptSistema = `Eres el coordinador de tráfico de la agencia Ninch. Hoy es ${fechaHoy}.
+      const promptSistema = `Eres el coordinador de tráfico de Ninch. Hoy es ${fechaHoy}.
       
-      REGLA DE ORO INQUEBRANTABLE:
-      Sin importar cómo formule la pregunta el usuario (incluso si solo dice "cuántas" o "quién"), ESTÁS OBLIGADO A MOSTRAR EL LISTADO COMPLETO de tareas. NUNCA respondas con un simple resumen de una oración.
+      REGLA DE ORO: DEBES MOSTRAR EL LISTADO COMPLETO DE TAREAS.
       
-      ESTRUCTURA QUE DEBES CUMPLIR OBLIGATORIAMENTE:
-      Para CADA persona mencionada en los datos (fíjate en la etiqueta "u" de cada tarea):
-      1. Pon el nombre de la persona como título principal.
-      2. Subdivide sus tareas en "TAREAS ACTIVAS" (fecha "d" NO contiene "[VENCIDA]") y "TAREAS VENCIDAS" (fecha "d" CONTIENE "[VENCIDA]").
-      
-      REGLAS DE FORMATO POR TAREA:
-      - Usa este formato exacto: **[Cliente > Proyecto] Título** | Vencimiento: Fecha
-      - PROHIBIDO inventar tareas o listar a los participantes en las viñetas.
+      ESTRUCTURA:
+      Para CADA persona (etiqueta "u"):
+      1. Título con su nombre.
+      2. "TAREAS ACTIVAS" (sin "[VENCIDA]") y "TAREAS VENCIDAS" (con "[VENCIDA]").
+      3. Formato: **[Cliente > Proyecto] Título** | Vencimiento: Fecha
       
       CIERRE:
-      - Recuento numérico general.
-      - "### Veredicto de Disponibilidad": Escribe un párrafo completo y analítico comparando la carga de trabajo de los involucrados para justificar quién está más libre para un nuevo proyecto.`;
+      - Recuento numérico.
+      - "### Veredicto de Disponibilidad": Párrafo analítico.`;
       
-      const promptUsuario = `Solicitud original: "${text}". \n\nDatos reales (TIENES QUE MOSTRAR EL LISTADO OBLIGATORIAMENTE AGRUPADO POR LA ETIQUETA "u"): ${JSON.stringify(tareasFinales)}`;
+      const promptUsuario = `Solicitud: "${text}". \n\nDatos: ${JSON.stringify(tareasFinales)}`;
 
       const openaiResponse = await fetch('https://api.openai.com/v1/chat/completions', {
         method: 'POST',
         headers: { 'Authorization': `Bearer ${process.env.OPENAI_API_KEY}`, 'Content-Type': 'application/json' },
         body: JSON.stringify({
           model: "gpt-4o-mini",
-          messages: [
-            { role: "system", content: promptSistema },
-            { role: "user", content: promptUsuario }
-          ],
+          messages: [{ role: "system", content: promptSistema }, { role: "user", content: promptUsuario }],
           temperature: 0.6 
         })
       });
@@ -232,7 +194,6 @@ export default async function handler(req, res) {
       const openaiData = await openaiResponse.json();
       const iaResponse = openaiData.choices?.[0]?.message?.content || "No se pudo generar el análisis.";
 
-      // 5. Enviar a Slack
       await fetch(response_url, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -241,36 +202,27 @@ export default async function handler(req, res) {
 
       return res.status(200).json({ success: true });
     } catch (error) {
-      console.error("Error en background:", error);
       await fetch(req.body.response_url, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ response_type: "in_channel", text: `❌ Error procesando los datos: ${error.message}` })
+        body: JSON.stringify({ response_type: "in_channel", text: `❌ Error: ${error.message}` })
       });
       return res.status(500).json({ error: error.message });
     }
   }
 
-  // =========================================================================
-  // PARTE 2: MODO SLACK (Respuesta instantánea)
-  // =========================================================================
+  // PARTE 2: MODO SLACK
   const userMessage = req.body.text;
   const responseUrl = req.body.response_url;
-
   const protocol = req.headers['x-forwarded-proto'] || 'https';
   const host = req.headers['host'];
-  const selfUrl = `${protocol}://${host}/api/webhook`;
-
-  fetch(selfUrl, {
+  
+  fetch(`${protocol}://${host}/api/webhook`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ is_background: true, text: userMessage, response_url: responseUrl })
   }).catch(console.error);
 
   await new Promise(resolve => setTimeout(resolve, 50));
-
-  return res.status(200).json({ 
-    response_type: "in_channel",
-    text: "⏳ Buscando subtareas planas y consultando red profunda... Esto tomará unos segundos." 
-  });
+  return res.status(200).json({ response_type: "in_channel", text: "⏳ Extrayendo datos en crudo sin filtros... Esto tomará unos segundos." });
 }
