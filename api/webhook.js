@@ -7,27 +7,28 @@ export default async function handler(req, res) {
       const textoLower = text.toLowerCase();
 
       // 1. DIRECTORIO Y MAPEOS
-      const DIRECTORIO_CREATIVO = {
+     const DIRECTORIO_CREATIVO = {
         "nasa": 103413, "lombardo": 103413, "agustina perez": 103414,
         "carolina": 103421, "dorso": 103421, "vanesa": 103434, "copes": 103434,
         "mercedes": 103436, "palumbo": 103436, "lucas": 103439, "vega": 103439,
         "candela jordi": 103441, "jordi": 103441, "joi": 103443, "sanchez": 103443,
         "demian": 103453, "buezas": 103453, "julieta": 103455, "lamarque": 103455,
-        "agustina carro": 103467, "carro": 103467, "candela dallocchio": 103468, "dallocchio": 103468,
-        "ignacio": 103477, "cairola": 103477, "sol": 103479, "rodriguez": 103479, "escudero": 103479,
+        "sol": 103479, "rodriguez": 103479, "escudero": 103479,
         "leandro": 103480, "lean": 103480, "barral": 103480, "federico": 103481, "fede": 103481, "martinez": 103481,
-        "matilda": 103486, "brero": 103486, "joaquin": 104457, "baez": 104457,
-        "ana": 104458, "paula": 104458, "barel": 104458, "milagros": 104459, "garcia": 104459
+        "matilda": 103486, "brero": 103486, "matu": 103486, "joaquin": 104457, "baez": 104457,
+        "ana": 104458, "paula": 104458, "barel": 104458, "milagros": 104459, "garcia": 104459,
+        "violeta cassani": 109758, "violeta": 109758, "cassani": 109758, "adem": 109758,
+        "martina alonso": 109757, "martina": 109757, "alonso": 109757
       };
 
       const NOMBRES_POR_ID = {
         103413: "Nasa Lombardo", 103414: "Agustina Perez", 103421: "Carolina Dorso",
         103434: "Vanesa Copes", 103436: "Mercedes Palumbo", 103439: "Lucas Vega",
         103441: "Candela Jordi", 103443: "Joi Sanchez", 103453: "Demian Buezas",
-        103455: "Julieta Lamarque", 103467: "Agustina Carro", 103468: "Candela DallOcchio",
-        103477: "Ignacio Cairola", 103479: "Sol Rodriguez", 103480: "Leandro Barral",
+        103455: "Julieta Lamarque", 103479: "Sol Rodriguez", 103480: "Leandro Barral",
         103481: "Federico Martinez", 103486: "Matilda Brero", 104457: "Joaquin Baez",
-        104458: "Ana Paula Barel", 104459: "Milagros Garcia"
+        104458: "Ana Paula Barel", 104459: "Milagros Garcia",
+        109758: "Violeta Cassani", 109757: "Martina Alonso"
       };
 
       let idsABuscar = [];
